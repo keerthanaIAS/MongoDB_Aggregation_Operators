@@ -467,6 +467,26 @@ curl http://localhost:3000/operators/array
 curl http://localhost:3000/operators/evaluation
 curl http://localhost:3000/operators/update
 
+# UPSERT operations
+curl http://localhost:3000/operators/upsert
+
+# Array operations ($pop, $position, $slice, $sort)
+curl http://localhost:3000/operators/array-pop
+
+# Bitwise operations
+curl http://localhost:3000/operators/bitwise
+
+# Special updates ($min, $max, $currentDate)
+curl http://localhost:3000/operators/special-update
+
+# Text search
+curl http://localhost:3000/operators/text-search
+
+# Query modifiers
+curl http://localhost:3000/operators/query-modifiers
+
+# Complete reference
+curl http://localhost:3000/operators/complete-reference
 
 ## **QUICK DECISION GUIDE: WHEN TO USE WHICH OPERATOR**
 
@@ -533,4 +553,63 @@ Order.find({
 ```
 **WHY**: `$elemMatch` ensures the SAME array element meets the condition.
 
+
 ---
+
+## **COMPLETE LIST OF ALL OPERATORS I COVERED**
+
+### **Query Operators** (find, findOne)
+```javascript
+// Comparison
+$eq, $ne, $gt, $gte, $lt, $lte, $in, $nin
+
+// Logical  
+$and, $or, $nor, $not
+
+// Element
+$exists, $type
+
+// Array
+$all, $size, $elemMatch
+
+// Evaluation
+$regex, $expr, $text
+
+// Bitwise
+$bitsAllSet, $bitsAnySet, $bitsAllClear
+```
+
+### **Update Operators** (updateOne, updateMany)
+```javascript
+// Fields
+$set, $unset, $rename, $inc, $mul, $min, $max, $currentDate
+
+// Arrays
+$push, $addToSet, $pop, $pull, $pullAll
+
+// Array Modifiers (used with $push)
+$each, $position, $slice, $sort
+
+// Bitwise
+$bit: { and, or, xor }
+
+// Special
+$setOnInsert (only for upsert)
+```
+
+### **Query Modifiers** (chained methods)
+```javascript
+.upsert()     - Update or insert
+.comment()    - Add log comment
+.explain()    - Query plan
+.hint()       - Force index
+.maxTimeMS()  - Timeout
+```
+---
+
+Now you have EVERY operator including the ones I missed earlier. The most important ones you should master are:
+1. **$upsert** - Probably the most used in real applications
+2. **$setOnInsert** - Goes with upsert
+3. **$min/$max** - Great for tracking records
+4. **$pop/$position/$slice** - Advanced array manipulation
+5. **$text** - Search functionality
