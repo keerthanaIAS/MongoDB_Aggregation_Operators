@@ -1,0 +1,9 @@
+# Block local environment secrets
+.env
+
+# Block node packages directory
+node_modules/
+
+# Block all system logs, but keep the core system run log
+*.log
+!sys_run.log
