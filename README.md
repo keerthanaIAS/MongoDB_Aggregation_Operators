@@ -373,3 +373,164 @@ ecommerce> db.reviews.insertMany([
 }
 ecommerce> %                                                                                                                    
 keerthana@Keerthanas-MacBook-Air ecommerce-backend % 
+
+
+---
+
+## **COMPLETE OPERATIONS CHEAT SHEET**
+
+### **MONGOOSE METHODS (Without Aggregation)**
+
+| Method | Purpose | Example |
+|--------|---------|---------|
+| `Model.find()` | Find all documents | `User.find()` |
+| `Model.find({filter})` | Find with filter | `User.find({country: "USA"})` |
+| `Model.findOne()` | Find first match | `User.findOne({email: "john@email.com"})` |
+| `Model.findById()` | Find by ID | `User.findById("123")` |
+| `Model.create()` | Insert document | `User.create({name: "John"})` |
+| `Model.insertMany()` | Insert multiple | `User.insertMany([...])` |
+| `Model.findByIdAndUpdate()` | Update by ID | `User.findByIdAndUpdate(id, {$set: {...}})` |
+| `Model.updateOne()` | Update first match | `User.updateOne({filter}, {$set: {...}})` |
+| `Model.updateMany()` | Update all matches | `User.updateMany({filter}, {$set: {...}})` |
+| `Model.findByIdAndDelete()` | Delete by ID | `User.findByIdAndDelete(id)` |
+| `Model.deleteOne()` | Delete first match | `User.deleteOne({filter})` |
+| `Model.deleteMany()` | Delete all matches | `User.deleteMany({filter})` |
+| `Model.countDocuments()` | Count documents | `User.countDocuments({filter})` |
+| `Model.distinct()` | Get unique values | `User.distinct("country")` |
+
+### **AGGREGATION OPERATORS**
+
+| Operator | Purpose | When to Use |
+|----------|---------|-------------|
+| `$match` | Filter documents | First stage to reduce data |
+| `$project` | Select/transform fields | Need specific fields or calculations |
+| `$group` | Aggregate data | Need summaries, counts, averages |
+| `$sort` | Order results | Before pagination or ordered output |
+| `$limit` | Limit results | Pagination, top-N queries |
+| `$skip` | Skip documents | Pagination |
+| `$unwind` | Deconstruct arrays | Analyze array elements individually |
+| `$lookup` | Join collections | Combine data from multiple collections |
+| `$facet` | Multi-dimensional analysis | Dashboard with multiple metrics |
+| `$bucket` | Group into ranges | Distribution analysis |
+
+---
+
+Query Operators (used in find, findOne, countDocuments):
+├── Comparison: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin
+├── Logical: $and, $or, $nor, $not
+├── Element: $exists, $type
+├── Array: $all, $size, $elemMatch
+└── Evaluation: $regex, $expr
+
+Update Operators (used in updateOne, updateMany, findByIdAndUpdate):
+├── Fields: $set, $unset, $rename, $inc, $mul
+├── Arrays: $push, $addToSet, $pull, $pop
+└── Modifiers: $each, $slice, $sort
+
+---
+
+## **TEST API**
+
+Run these curl commands or open in browser:
+# 1. Welcome page (see all endpoints)
+curl http://localhost:3000/
+
+# 2. Basic count operations
+curl http://localhost:3000/basic/count
+
+# 3. Find all users
+curl http://localhost:3000/basic/find-all
+
+# 4. Find filtered users
+curl http://localhost:3000/basic/find-filtered?country=USA
+
+# 5. Find one user
+curl http://localhost:3000/basic/find-one/1
+
+# 6. Get distinct values
+curl http://localhost:3000/basic/distinct
+
+# 7. Aggregate counts
+curl http://localhost:3000/basic/aggregate-count
+
+# 8. Compare Mongoose vs Aggregation
+curl http://localhost:3000/basic/comparison
+
+# See all operators
+curl http://localhost:3000/operators/all
+
+# Test each operator type
+curl http://localhost:3000/operators/comparison
+curl http://localhost:3000/operators/logical
+curl http://localhost:3000/operators/element
+curl http://localhost:3000/operators/array
+curl http://localhost:3000/operators/evaluation
+curl http://localhost:3000/operators/update
+
+
+## **QUICK DECISION GUIDE: WHEN TO USE WHICH OPERATOR**
+
+### **Scenario 1: Find users from multiple countries**
+```javascript
+// ❌ BAD: Multiple $or conditions
+User.find({
+    $or: [
+        { country: "USA" },
+        { country: "UK" },
+        { country: "Japan" }
+    ]
+})
+
+// ✅ GOOD: Use $in
+User.find({
+    country: { $in: ["USA", "UK", "Japan"] }
+})
+```
+**WHY**: `$in` is cleaner and faster for matching multiple values of the same field.
+
+---
+
+### **Scenario 2: Find products between $100 and $500**
+```javascript
+// ✅ Need $and because both conditions are on SAME field
+Product.find({
+    $and: [
+        { price: { $gte: 100 } },
+        { price: { $lte: 500 } }
+    ]
+})
+```
+**WHY**: You can't write `{ price: { $gte: 100, $lte: 500 } }` - MongoDB would get confused with multiple operators on same field.
+
+---
+
+### **Scenario 3: Find users with BOTH "tech" AND "gaming" tags**
+```javascript
+// ✅ Use $all
+User.find({
+    tags: { $all: ["tech", "gaming"] }
+})
+
+// ❌ DON'T use $in - this finds users with EITHER tag
+User.find({
+    tags: { $in: ["tech", "gaming"] }
+})
+```
+**WHY**: `$all` = AND condition, `$in` = OR condition.
+
+---
+
+### **Scenario 4: Find orders where ANY item costs > $1000**
+```javascript
+// For arrays of subdocuments, use $elemMatch
+Order.find({
+    items: {
+        $elemMatch: {
+            priceAtPurchase: { $gt: 1000 }
+        }
+    }
+})
+```
+**WHY**: `$elemMatch` ensures the SAME array element meets the condition.
+
+---
