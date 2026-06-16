@@ -613,3 +613,86 @@ Now you have EVERY operator including the ones I missed earlier. The most import
 3. **$min/$max** - Great for tracking records
 4. **$pop/$position/$slice** - Advanced array manipulation
 5. **$text** - Search functionality
+
+## COMPLETE OPERATOR REFERENCE TABLE
+------------------------------------
+# TOP-LEVEL OPERATORS (Used at query root level)
+These wrap around conditions, always at the same level as field names.
+
+Operator	Syntax	Example	What It Does
+$and	{ $and: [ {cond1}, {cond2} ] }	{ $and: [ {price: {$gt:100}}, {stock: {$lt:50}} ] }	ALL conditions must be true
+$or	{ $or: [ {cond1}, {cond2} ] }	{ $or: [ {color:"Red"}, {price: {$gt:500}} ] }	ANY condition true
+$nor	{ $nor: [ {cond1}, {cond2} ] }	{ $nor: [ {grade:"C"}, {score: {$lt:70}} ] }	NONE of the conditions true (ALL false)
+$expr	{ $expr: { operator: [args] } }	{ $expr: { $gt: ["$price", "$cost"] } }	Compare TWO FIELDS in same document
+
+# FIELD-LEVEL OPERATORS (Used INSIDE field conditions)
+These work on specific fields.
+
+Operator	Syntax	Example	What It Does
+$eq	{ field: { $eq: value } }	{ age: { $eq: 20 } }	Equals (same as {age: 20})
+$ne	{ field: { $ne: value } }	{ color: { $ne: "Black" } }	Not equal
+$gt	{ field: { $gt: value } }	{ price: { $gt: 500 } }	Greater than
+$gte	{ field: { $gte: value } }	{ price: { $gte: 500 } }	Greater than or equal
+$lt	{ field: { $lt: value } }	{ age: { $lt: 18 } }	Less than
+$lte	{ field: { $lte: value } }	{ age: { $lte: 18 } }	Less than or equal
+$in	{ field: { $in: [val1, val2] } }	{ city: { $in: ["Mumbai","Delhi"] } }	Value IN this list
+$nin	{ field: { $nin: [val1, val2] } }	{ city: { $nin: ["Mumbai","Delhi"] } }	Value NOT IN this list
+$not	{ field: { $not: { operator } } }	{ price: { $not: { $gt: 500 } } }	Negates an operator condition
+$all	{ field: { $all: [val1, val2] } }	{ tags: { $all: ["mongodb","react"] } }	Array contains ALL these values
+$size	{ field: { $size: number } }	{ tags: { $size: 3 } }	Array has exact length
+$elemMatch	{ field: { $elemMatch: {conds} } }	{ scores: { $elemMatch: {sub:"math", score:{$gt:90}} } }	ONE array element matches ALL conditions
+$exists	{ field: { $exists: boolean } }	{ phone: { $exists: false } }	Field exists or not
+$type	{ field: { $type: "type" } }	{ age: { $type: "string" } }	Field is of specified BSON type
+$regex	{ field: { $regex: /pattern/ } }	{ email: { $regex: /@gmail\.com$/i } }	Pattern matching
+
+# KEY DIFFERENCE: Top-Level vs Field-Level
+javascript
+// ❌ WRONG - $or used as field-level
+{ city: { $or: ["Mumbai", "Delhi"] } }  // Error!
+
+// ✅ CORRECT - $or is TOP-LEVEL
+{ $or: [ {city: "Mumbai"}, {city: "Delhi"} ] }
+
+// ✅ CORRECT - $in is FIELD-LEVEL (simpler for same field)
+{ city: { $in: ["Mumbai", "Delhi"] } }
+javascript
+// ❌ WRONG - $nor used as field-level
+{ price: { $nor: [70, 90] } }  // Error!
+
+// ✅ CORRECT - $nor is TOP-LEVEL
+{ $nor: [ {price: 70}, {price: 90} ] }
+
+// ✅ CORRECT - $nin is FIELD-LEVEL
+{ price: { $nin: [70, 90] } }
+
+# VISUAL HIERARCHY:
+text
+Query Document
+├── TOP LEVEL
+│   ├── $and: [{...}, {...}]
+│   ├── $or: [{...}, {...}]
+│   ├── $nor: [{...}, {...}]
+│   └── $expr: { $gt: ["$field1", "$field2"] }
+│
+└── FIELD LEVEL
+    └── fieldName: {
+        ├── $eq, $ne, $gt, $gte, $lt, $lte
+        ├── $in, $nin
+        ├── $not: { $gt: 5 }
+        ├── $all: [...]
+        ├── $size: 3
+        ├── $elemMatch: {...}
+        ├── $exists: true
+        ├── $type: "string"
+        └── $regex: /pattern/
+    }
+
+# QUICK RULES:
+Rule	Example
+Same field + multiple values	$in / $nin (field-level)
+Different fields + conditions	$or / $and / $nor (top-level)
+Array contains all values	$all (field-level)
+Array element matches all conditions	$elemMatch (field-level)
+Compare two fields	$expr (top-level)
+Negate an operator	$not (field-level)
+Negate multiple conditions	$nor (top-level)
