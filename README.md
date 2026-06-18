@@ -429,65 +429,6 @@ Update Operators (used in updateOne, updateMany, findByIdAndUpdate):
 
 ---
 
-## **TEST API**
-
-Run these curl commands or open in browser:
-# 1. Welcome page (see all endpoints)
-curl http://localhost:3000/
-
-# 2. Basic count operations
-curl http://localhost:3000/basic/count
-
-# 3. Find all users
-curl http://localhost:3000/basic/find-all
-
-# 4. Find filtered users
-curl http://localhost:3000/basic/find-filtered?country=USA
-
-# 5. Find one user
-curl http://localhost:3000/basic/find-one/1
-
-# 6. Get distinct values
-curl http://localhost:3000/basic/distinct
-
-# 7. Aggregate counts
-curl http://localhost:3000/basic/aggregate-count
-
-# 8. Compare Mongoose vs Aggregation
-curl http://localhost:3000/basic/comparison
-
-# See all operators
-curl http://localhost:3000/operators/all
-
-# Test each operator type
-curl http://localhost:3000/operators/comparison
-curl http://localhost:3000/operators/logical
-curl http://localhost:3000/operators/element
-curl http://localhost:3000/operators/array
-curl http://localhost:3000/operators/evaluation
-curl http://localhost:3000/operators/update
-
-# UPSERT operations
-curl http://localhost:3000/operators/upsert
-
-# Array operations ($pop, $position, $slice, $sort)
-curl http://localhost:3000/operators/array-pop
-
-# Bitwise operations
-curl http://localhost:3000/operators/bitwise
-
-# Special updates ($min, $max, $currentDate)
-curl http://localhost:3000/operators/special-update
-
-# Text search
-curl http://localhost:3000/operators/text-search
-
-# Query modifiers
-curl http://localhost:3000/operators/query-modifiers
-
-# Complete reference
-curl http://localhost:3000/operators/complete-reference
-
 ## **QUICK DECISION GUIDE: WHEN TO USE WHICH OPERATOR**
 
 ### **Scenario 1: Find users from multiple countries**
@@ -665,27 +606,6 @@ javascript
 // ✅ CORRECT - $nin is FIELD-LEVEL
 { price: { $nin: [70, 90] } }
 
-# VISUAL HIERARCHY:
-text
-Query Document
-├── TOP LEVEL
-│   ├── $and: [{...}, {...}]
-│   ├── $or: [{...}, {...}]
-│   ├── $nor: [{...}, {...}]
-│   └── $expr: { $gt: ["$field1", "$field2"] }
-│
-└── FIELD LEVEL
-    └── fieldName: {
-        ├── $eq, $ne, $gt, $gte, $lt, $lte
-        ├── $in, $nin
-        ├── $not: { $gt: 5 }
-        ├── $all: [...]
-        ├── $size: 3
-        ├── $elemMatch: {...}
-        ├── $exists: true
-        ├── $type: "string"
-        └── $regex: /pattern/
-    }
 
 # QUICK RULES:
 Rule	Example
