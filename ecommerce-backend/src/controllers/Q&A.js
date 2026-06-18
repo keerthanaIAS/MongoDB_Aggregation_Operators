@@ -1134,59 +1134,59 @@ User.aggregate([
 // $sum
 
 Order.aggregate([
-  {
-    $lookup: {
-      from: "products",
-      localField: "_id",
-      foreignField: "orderId",
-      as: "products"
+    {
+        $lookup: {
+            from: "products",
+            localField: "_id",
+            foreignField: "orderId",
+            as: "products"
+        }
+    },
+    {
+        $unwind: "$products"
+    },
+    {
+        $lookup: {
+            from: "users",
+            localField: "userId",
+            foreignField: "_id",
+            as: "user"
+        }
+    },
+    {
+        $unwind: "$user"
+    },
+    {
+        $group: {
+            _id: "$_id",
+            userId: { $first: "$user._id" },
+            name: { $first: "$user.name" },
+            amount: { $first: "$amount" },
+            categories: {
+                $push: "$products.category"
+            }
+        }
+    },
+    {
+        $group: {
+            _id: "$userId",
+            name: { $first: "$name" },
+            totalOrders: { $sum: 1 },
+            totalSpent: { $sum: "$amount" },
+            categories: {
+                $push: "$categories"
+            }
+        }
+    },
+    {
+        $project: {
+            _id: 0,
+            name: 1,
+            totalOrders: 1,
+            totalSpent: 1,
+            categories: 1
+        }
     }
-  },
-  {
-    $unwind: "$products"
-  },
-  {
-    $lookup: {
-      from: "users",
-      localField: "userId",
-      foreignField: "_id",
-      as: "user"
-    }
-  },
-  {
-    $unwind: "$user"
-  },
-  {
-    $group: {
-      _id: "$_id",
-      userId: { $first: "$user._id" },
-      name: { $first: "$user.name" },
-      amount: { $first: "$amount" },
-      categories: {
-        $push: "$products.category"
-      }
-    }
-  },
-  {
-    $group: {
-      _id: "$userId",
-      name: { $first: "$name" },
-      totalOrders: { $sum: 1 },
-      totalSpent: { $sum: "$amount" },
-      categories: {
-        $push: "$categories"
-      }
-    }
-  },
-  {
-    $project: {
-      _id: 0,
-      name: 1,
-      totalOrders: 1,
-      totalSpent: 1,
-      categories: 1
-    }
-  }
 ])
 
 // Why not?
@@ -1220,3 +1220,123 @@ Order.aggregate([
 // Interview Memory
 // $setUnion
 // Merge arrays and remove duplicates.
+
+
+
+
+// Interview Problem: $replaceRoot
+// ===================================
+// Collections
+// Users
+// {
+//   _id: 1,
+//   name: "John",
+//   age: 25
+// },
+// {
+//   _id: 2,
+//   name: "Alice",
+//   age: 30
+// }
+// Orders
+// {
+//   _id: 101,
+//   userId: 1,
+//   amount: 1000
+// },
+// {
+//   _id: 102,
+//   userId: 2,
+//   amount: 2000
+// }
+// Requirement
+// Return:
+// [
+//   {
+//     name: "John",
+//     age: 25
+//   },
+//   {
+//     name: "Alice",
+//     age: 30
+//   }
+// ]
+// Notice:
+// NO order fields
+// NO user array
+// ONLY user document
+// Rules:
+// Use:
+// $lookup
+// $unwind
+// $replaceRoot
+
+Order.aggregate([
+    {
+        $lookup: {
+            from: "users",
+            localField: "userId",
+            foreignField: "_id",
+            as: "user"
+        }
+    },
+    {
+        $unwind: "$user"
+    },
+    {
+        $replaceRoot: {
+            newRoot: "$user"
+        }
+    }
+])
+
+// Think First
+// After $lookup:
+// {
+//   _id: 101,
+//   amount: 1000,
+//   userId: 1,
+//   user: [
+//     {
+//       _id: 1,
+//       name: "John",
+//       age: 25
+//     }
+//   ]
+// }
+
+// After $unwind:
+// {
+//   _id: 101,
+//   amount: 1000,
+//   userId: 1,
+//   user: {
+//     _id: 1,
+//     name: "John",
+//     age: 25
+//   }
+// }
+
+// After $replaceRoot:
+// It does:
+// Delete entire current document
+// Replace it with user object
+// So output becomes:
+// {
+//   _id: 1,
+//   name: "John",
+//   age: 25
+// }
+
+// Easy Memory Trick:
+// Think:
+// $project
+// --------
+// Shape document
+// $addFields
+// ----------
+// Add fields
+// $replaceRoot
+// ------------
+// Throw away whole document
+// and use another document instead
