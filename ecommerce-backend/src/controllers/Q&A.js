@@ -1,6 +1,8 @@
 const Order = require("../models/Order");
 const User = require("../models/User");
 
+const employees;
+
 // Interview Problem #1 (Easy-Medium):
 // ====================================
 // Collections:
@@ -1340,3 +1342,1276 @@ Order.aggregate([
 // ------------
 // Throw away whole document
 // and use another document instead
+
+
+
+
+// Question 1 — First & Last
+// ============================
+// Collection:
+// employees:
+// [
+//   {
+//     name: "John",
+//     department: "IT",
+//     joiningYear: 2020
+//   },
+//   {
+//     name: "Sara",
+//     department: "IT",
+//     joiningYear: 2018
+//   },
+//   {
+//     name: "Mike",
+//     department: "IT",
+//     joiningYear: 2023
+//   },
+//   {
+//     name: "David",
+//     department: "HR",
+//     joiningYear: 2019
+//   },
+//   {
+//     name: "Emma",
+//     department: "HR",
+//     joiningYear: 2021
+//   }
+// ]
+// Requirement:
+// For each department return:
+// department
+// firstEmployee
+// lastEmployee
+// Rules:
+// First employee = earliest joiningYear
+// Last employee = latest joiningYear
+// Expected IT:-
+// {
+//   department: "IT",
+//   firstEmployee: "Sara",
+//   lastEmployee: "Mike"
+// }
+// Must Use:-
+// $sort
+// $group
+// $first
+// $last
+// $project
+// Questions:-
+// Why must $sort come before $group?
+// What happens if we remove $sort?
+// Write the complete pipeline.
+
+employees.aggregate([
+    {
+        $sort: {
+            joiningYear: 1
+        }
+    },
+    {
+        $group: {
+            _id: "$department",
+            firstEmployee: {
+                $first: "$name"
+            },
+            lastEmployee: {
+                $last: "$name"
+            }
+        }
+    },
+    {
+        $project: {
+            _id: 0,
+            department: "$_id",
+            firstEmployee: 1,
+            lastEmployee: 1
+        }
+    }
+])
+
+// Here:
+// $first
+// $last
+// are group accumulators.
+// They mean:
+// First document entering the group
+// Last document entering the group
+// Example:
+// Documents entering group:
+// John  (2020)
+// Sara  (2018)
+// Mike  (2023)
+// Without sorting:
+// John enters first
+// Mike enters last
+// Result:
+// {
+//   firstEmployee: "John",
+//   lastEmployee: "Mike"
+// }
+// Wrong.
+// After sorting by joiningYear:
+// Sara  (2018)
+// John  (2020)
+// Mike  (2023)
+// Now:
+// $first -> Sara
+// $last  -> Mike
+// Correct.
+
+
+
+
+// Question 2 — $push vs $addToSet
+// ====================================
+// Collection:
+// [
+//   { department:"IT", skill:"Node" },
+//   { department:"IT", skill:"MongoDB" },
+//   { department:"IT", skill:"Node" },
+//   { department:"HR", skill:"Excel" },
+//   { department:"HR", skill:"Excel" }
+// ]
+// Requirement:
+// Return for each department:
+// department
+// allSkills
+// uniqueSkills
+// Must use:
+// $group
+// $push
+// $addToSet
+// $project
+// Also answer:
+// What is the difference between $push and $addToSet?
+//  => Answer push will have the duplicates of elements and addtoset will remove the duplicate of elements.
+// More precise:
+// $push      → stores every value
+// $addToSet  → stores only unique values
+// What will IT output look like?
+
+User.aggregate([
+    {
+        $group: {
+            _id: "$department",
+            allSkills: {
+                $push: "$skill"
+            },
+            uniqueSkills: {
+                $addToSet: "$skill"
+            }
+        }
+    },
+    {
+        $project: {
+            _id: 0,
+            department: "$_id",
+            allSkills: 1,
+            uniqueSkills: 1
+        }
+    }
+])
+// Interview Follow-up:
+// Suppose we have:
+// {
+//   department: "IT",
+//   employee: "John",
+//   skill: "Node"
+// }
+// and
+// {
+//   department: "IT",
+//   employee: "Sara",
+//   skill: "Node"
+// }
+// Then:
+// $addToSet: "$skill"
+// returns:
+// ["Node"]
+// But:
+// $addToSet: {
+//   employee: "$employee",
+//   skill: "$skill"
+// }
+// returns:
+// [
+//   { employee:"John", skill:"Node" },
+//   { employee:"Sara", skill:"Node" }
+// ]
+// Because the whole object must be identical to be considered a duplicate.
+// Very common interview question.
+
+
+
+// Question 3 — Array Operators ($size, $filter, $map)
+// ====================================================
+// Collection:
+// [
+//   {
+//     name: "John",
+//     skills: [
+//       { name: "Node", exp: 3 },
+//       { name: "MongoDB", exp: 1 }
+//     ]
+//   },
+//   {
+//     name: "Sara",
+//     skills: [
+//       { name: "React", exp: 5 },
+//       { name: "Node", exp: 4 }
+//     ]
+//   }
+// ]
+// Requirement:
+// Return:
+// name
+// skillCount
+// experiencedSkills
+// skillNames
+// Where:
+// skillCount = total skills
+// experiencedSkills = only skills with exp > 2
+// skillNames = array containing only skill names
+// Must Use:-
+// $project
+// $size
+// $filter
+// $map
+// Expected for John:-
+// {
+//   name: "John",
+//   skillCount: 2,
+//   experiencedSkills: [
+//     { name:"Node", exp:3 }
+//   ],
+//   skillNames: [
+//     "Node",
+//     "MongoDB"
+//   ]
+// }
+
+User.aggregate([
+    {
+        $project: {
+            _id: 0,
+            name: 1,
+
+            skillCount: {
+                $size: "$skills"
+            },
+
+            experiencedSkills: {
+                $filter: {
+                    input: "$skills",
+                    as: "skill",
+                    cond: {
+                        $gt: ["$$skill.exp", 2]
+                    }
+                }
+            },
+
+            skillNames: {
+                $map: {
+                    input: "$skills",
+                    as: "skill",
+                    in: "$$skill.name"
+                }
+            }
+        }
+    }
+])
+
+
+
+
+// Interview Question:
+// =============================================
+// What is the difference?
+// $filter
+// {
+//   $filter: {
+//     input: "$skills",
+//     as: "skill",
+//     cond: {
+//       $gt: ["$$skill.exp", 2]
+//     }
+//   }
+// }
+// Output:
+// [
+//   { name:"Node", exp:3 }
+// ]
+// $map
+// {
+//   $map: {
+//     input: "$skills",
+//     as: "skill",
+//     in: "$$skill.name"
+//   }
+// }
+// Output:
+// ["Node","MongoDB"]
+// One line answer:
+
+// $filter = ?
+// $map = ?
+
+// Answer:
+// $filter = only filter the elements that satisfies the condition
+// $map = loop through the array
+// ✅ Correct.
+// For interview language:
+// $filter = returns only the array elements that match a condition.
+// $map = transforms each array element and returns a new array.
+
+
+
+
+
+
+
+// Question 4 — String Operators
+// =======================================
+// Collection:
+// [
+//   {
+//     firstName: " john ",
+//     lastName: " doe ",
+//     email: "JOHN@GMAIL.COM"
+//   },
+//   {
+//     firstName: " sara ",
+//     lastName: " smith ",
+//     email: "SARA@GMAIL.COM"
+//   }
+// ]
+// Requirement:
+// Return:
+// fullName
+// upperName
+// normalizedEmail
+// emailParts
+// nameLength
+// Where:
+// fullName
+// Remove spaces and join names.
+// "john doe"
+// upperName
+// "JOHN DOE"
+// normalizedEmail
+// Convert email to lowercase.
+// "john@gmail.com"
+// emailParts
+// Split email by @
+// ["john", "gmail.com"]
+// nameLength
+// Length of:
+// "john doe"
+// which is:
+// 8
+// (4 + 1 + 3)
+// Must Use:-
+// $project
+// $trim
+// $concat
+// $toUpper
+// $toLower
+// $split
+// $strLenCP
+// Expected Output
+// {
+//   fullName: "john doe",
+//   upperName: "JOHN DOE",
+//   normalizedEmail: "john@gmail.com",
+//   emailParts: ["john","gmail.com"],
+//   nameLength: 8
+// }
+User.aggregate([
+    {
+        $project: {
+            fullName: {
+                $concat: [
+                    { $trim: { input: "$firstName" } },
+                    " ",
+                    { $trim: { input: "$lastName" } }
+                ]
+            },
+            upperName: {
+                input: {
+                    $concat: [
+                        { $trim: { input: "$firstName" } },
+                        " ",
+                        { $trim: { input: "$lastName" } }
+                    ]
+                }
+            },
+            normalizedEmail: {
+                $toLower: "$email"
+            },
+            emailParts: {
+                $split: [{ $toLower: "$email" }, '@']
+            },
+            nameLength: {
+                $steLenCP: {
+                    $concat: [
+                        { $trim: { input: "$firstName" } },
+                        " ",
+                        { $trim: { input: "$lastName" } }
+                    ]
+                }
+            }
+        }
+    }
+])
+// Interview Bonus Question:-
+// What is the difference between:
+// $strLenCP: Length of the string
+// and
+// $strLenBytes: Length of bytes memory 
+// ✅ Mostly correct.
+// Better answer:
+// Operator	Counts
+// $strLenCP	Characters (Unicode code points)
+// $strLenBytes	Actual UTF-8 bytes
+// Example:
+// A
+// $strLenCP = 1
+// $strLenBytes = 1
+// Example:
+// 😀
+// $strLenCP = 1
+// $strLenBytes = 4
+// Because one emoji is one character but uses four bytes.
+
+
+
+
+
+// Question 5 — Set Operators:
+// =====================================================
+// Collection:
+// [
+//     {
+//         name: "John",
+//         skills: ["Node", "MongoDB", "Redis"]
+//     },
+//     {
+//         name: "Sara",
+//         skills: ["Node", "React", "AWS"]
+//     }
+// ]
+// Requirement:
+// Return:
+// commonSkills
+// allSkills
+// johnOnlySkills
+// isSubset
+// Must use:
+// $setIntersection
+// $setUnion
+// $setDifference
+// $setIsSubset
+// Expected:
+// {
+//     commonSkills: ["Node"],
+//     allSkills: ["Node", "MongoDB", "Redis", "React", "AWS"],
+//     johnOnlySkills: ["MongoDB", "Redis"],
+//     isSubset: false
+// }
+// Hint:
+// You will probably need:
+// $arrayElemAt
+// to access John's and Sara's skills.
+
+User.aggregate([
+    {
+        $group: {
+            _id: null,
+            users: {
+                $push: "$$ROOT" // {
+                // users: [
+                //      {
+                //          name: "John",
+                //          skills: ["Node", "MongoDB", "Redis"]
+                //      },
+                //      {
+                //          name: "Sara",
+                //          skills: ["Node", "React", "MongoDB"]
+                //      }
+                //  ]
+                // }
+            }
+        }
+    },
+    {
+        $project: {
+            commonSkills: {
+                $setIntersection: [
+                    { $arrayElemAt: ["$users.skills", 0] },
+                    { $arrayElemAt: ["$users.skills", 1] }
+                ] // ["Node", "MongoDB"]
+            },
+            allSkills: {
+                $setUnion: [
+                    { $arrayElemAt: ["$users.skills", 0] },
+                    { $arrayElemAt: ["$users.skills", 1] }
+                ] // ["Node", "MongoDB", "Redis", "React"]
+            },
+            johnOnlySkills: {
+                $setDifference: [
+                    { $arrayElemAt: ["$users.skills", 0] },
+                    { $arrayElemAt: ["$users.skills", 1] }
+                ] // ["Redis"]
+            },
+            isSubset: {
+                $setIsSubset: [
+                    { $arrayElemAt: ["$users.skills", 0] },
+                    { $arrayElemAt: ["$users.skills", 1] }
+                ] // false
+            }
+        }
+    }
+])
+// $setIsSubset Rules:
+// Returns true when:-
+// javascript
+// // 1. First array is empty
+// $setIsSubset: [[], ["Node", "MongoDB"]]
+// // true - empty array is subset of any array
+// // 2. All elements of first exist in second
+// $setIsSubset: [["Node"], ["Node", "MongoDB", "Redis"]]
+// // true - "Node" exists in second array
+// // 3. Both arrays are empty
+// $setIsSubset: [[], []]
+// // true
+// // 4. Identical arrays
+// $setIsSubset: [["Node", "MongoDB"], ["MongoDB", "Node"]]
+// // true - same elements (order doesn't matter)
+// Returns false when:-
+// javascript
+// // 1. Any element in first is missing from second
+// $setIsSubset: [["Node", "MongoDB", "Redis"], ["Node", "React", "AWS"]]
+// // false - "MongoDB" and "Redis" not in second
+// // 2. Second array is empty but first is not
+// $setIsSubset: [["Node"], []]
+// // false - nothing can be subset of empty array (except empty itself)
+
+// Interview Lesson:
+// Whenever you see:
+// Compare document A with document B
+// Compare user 1 with user 2
+// Compare two arrays from different documents
+// Think:
+// $group
+//    ↓
+// $push
+//    ↓
+// $arrayElemAt
+//    ↓
+// comparison operator
+// because MongoDB aggregation normally works on one document at a time.
+
+
+
+
+
+
+// Question 6 — Date Operators (Very Common in Real Projects)
+// =========================================================
+// Collection:
+// [
+//   {
+//     name: "John",
+//     joinedAt: ISODate("2023-01-15T10:30:00Z")
+//   },
+//   {
+//     name: "Sara",
+//     joinedAt: ISODate("2024-06-20T14:20:00Z")
+//   }
+// ]
+// Requirement:
+// Return:
+// name
+// joinYear
+// joinMonth
+// formattedDate
+// nextYearDate
+// experienceDays
+// Must Use:
+// $project
+// $year
+// $month
+// $dateToString
+// $dateAdd
+// $dateDiff
+// Expected Output For John
+// Something like:
+// {
+//   name: "John",
+//   joinYear: 2023,
+//   joinMonth: 1,
+//   formattedDate: "15-01-2023",
+//   nextYearDate: ISODate("2024-01-15T10:30:00Z"),
+//   experienceDays: <number_of_days>
+// }
+User.aggregate([
+    {
+        $project: {
+            _id: 0,
+            name: 1,
+            joinYear: { $year: "$joinedAt" },
+            joinMonth: { $month: "$joinedAt" },
+            formattedDate: { $dateToString: { format: "%d-%m-%Y", date: "$joinedAt" } },
+            nextYearDate: {
+                $dateAdd: {
+                    startDate: "$joinedAt",
+                    unit: "year",
+                    amount: 1
+                } // Add 1 year to joinedAt
+            },
+            experienceDays: {
+                $dateDiff: {
+                    startDate: "$joinedAt",
+                    endDate: "$$NOW",
+                    unit: "day"
+                } // How many days between joinedAt and now
+            }
+        }
+    }
+])
+// Bonus Interview Question:-
+// What is the difference between:
+// $month -> get the month in the date string
+// and
+// $dateToString -> get the date full
+// Operator	         Output
+// $month	       Number (1-12)
+// $dateToString   Custom formatted string
+// Example:
+// {
+//   $month: "$joinedAt"
+// }
+// Output:
+// 1
+// {
+//   $dateToString: {
+//     format: "%B",
+//     date: "$joinedAt"
+//   }
+// }
+// Output:
+// January
+// So:
+// $month → numeric extraction
+// $dateToString → formatting
+
+
+
+
+// Question 7 — Mixed Interview Question
+// ====================================================
+// Now we'll combine almost everything you've learned:
+// Must use:
+// $match
+// $expr
+// $filter
+// $size
+// $map
+// $cond
+// $multiply
+// $dateDiff
+// $project
+// Collection:
+// [
+//   {
+//     name: "John",
+//     salary: 50000,
+//     joinedAt: ISODate("2023-01-15"),
+//     skills: [
+//       { name: "Node", exp: 3 },
+//       { name: "MongoDB", exp: 1 }
+//     ]
+//   },
+//   {
+//     name: "Sara",
+//     salary: 80000,
+//     joinedAt: ISODate("2022-01-10"),
+//     skills: [
+//       { name: "React", exp: 5 },
+//       { name: "Node", exp: 4 }
+//     ]
+//   }
+// ]
+// Requirement:
+// Return only users where:
+// salary * 12 > 600000
+// AND
+// at least 2 skills
+User.aggregate([
+    {
+        $match: {
+            $expr: {
+                $and: [
+                    {
+                        $gt: [
+                            { $multiply: ["$salary", 12] },
+                            600000
+                        ]
+                    },
+                    {
+                        $gt: [
+                            { $size: "$skills" },
+                            1
+                        ]
+                    }
+                ]
+            }
+        }
+    },
+    {
+        $project: {
+            _id: 0,
+            name: 1,
+            annualSalary: { $multiply: ["$salary", 12] },
+            skillCount: { $size: "$skills" },
+            experiencedSkills: {
+                $filter: {
+                    input: "$skills",
+                    as: "skill",
+                    cond: {
+                        $gt: ["$$skill.exp", 2]
+                    }
+                }
+            },
+            skillNames: {
+                $map: {
+                    input: "$skills",
+                    as: "skill",
+                    in: "$$skill.name"
+                }
+            },
+            experienceDays: {
+                $dateDiff: {
+                    startDate: "$joinedAt",
+                    endDate: "$$NOW",
+                    unit: "day"
+                }
+            },
+            level: {
+                $cond: {
+                    if: { $gt: [{ $multiply: ["$salary", 12] }, 700000] },
+                    then: "Senior",
+                    else: "Junior"
+                }
+            },
+        }
+    }
+])
+// Shortcut For Interviews
+// When reading requirements:
+
+// Contains words like:
+// where
+// only
+// greater than
+// less than
+// equal
+// at least
+// Think:
+// $match
+
+// Contains words like:
+// return
+// show
+// output
+// display
+// create field
+// calculate field
+// format
+// Think:
+// $project
+
+
+
+
+
+// Now the Most Important Interview Combination
+// =============================================
+// Collections:
+// users
+// [
+//   {
+//     _id: 1,
+//     name: "John"
+//   },
+//   {
+//     _id: 2,
+//     name: "Sara"
+//   }
+// ]
+// orders
+// [
+//   {
+//     _id: 101,
+//     userId: 1,
+//     amount: 5000
+//   },
+//   {
+//     _id: 102,
+//     userId: 1,
+//     amount: 7000
+//   },
+//   {
+//     _id: 103,
+//     userId: 2,
+//     amount: 3000
+//   }
+// ]
+// Requirement:
+// Return:
+// name
+// totalOrders
+// totalAmount
+// avgAmount
+// Expected:
+// {
+//   name: "John",
+//   totalOrders: 2,
+//   totalAmount: 12000,
+//   avgAmount: 6000
+// }
+// Must Use
+// $lookup
+// $unwind
+// $group
+// $sum
+// $avg
+// $project
+Order.aggregate([
+    {
+        // In $lookup: No $. Field names only.
+        $lookup: {
+            from: "users",
+            localField: "userId",
+            foreignField: "_id",
+            as: "user"
+        }
+    },
+    {
+        $unwind: "$user"
+    },
+    {
+        $group: {
+            _id: "$userId",
+            // Why $first?
+            // Because every grouped order for the same user has the same name.
+            // We just need one copy.
+            name: {
+                $first: "$user.name"
+            },
+            totalOrders: {
+                $sum: 1
+            },
+            totalAmount: {
+                $sum: "$amount"
+            },
+            avgAmount: {
+                $avg: "$amount"
+            }
+        }
+    },
+    {
+        $project: {
+            name: "$user.name",
+            totalOrders: 1,
+            totalAmount: 1,
+            avgAmount: 1
+        }
+    }
+])
+
+
+
+
+// Collections:
+// ===========================================
+// users:
+// [
+//   {
+//     _id: 1,
+//     name: "John"
+//   },
+//   {
+//     _id: 2,
+//     name: "Sara"
+//   }
+// ]
+// orders:
+// [
+//   {
+//     _id: 101,
+//     userId: 1,
+//     amount: 5000
+//   },
+//   {
+//     _id: 102,
+//     userId: 1,
+//     amount: 15000
+//   },
+//   {
+//     _id: 103,
+//     userId: 2,
+//     amount: 2000
+//   }
+// ]
+// Requirement:
+// Return users with only high-value orders.
+// High-value means:
+// amount > 10000
+// Expected for John:
+// {
+//   _id: 1,
+//   name: "John",
+//   highOrders: [
+//     {
+//       _id: 102,
+//       userId: 1,
+//       amount: 15000
+//     }
+//   ]
+// }
+// Must use:
+// $lookup
+// pipeline
+// let
+// $expr
+User.aggregate([
+    {
+        $lookup: {
+            from: "orders",
+            let: {
+                userId: "$_id"
+            },
+            pipeline: [
+                {
+                    $match: {
+                        $expr: {
+                            $and: [
+                                {
+                                    $eq: ["$userId", "$$userId"]
+                                },
+                                {
+                                    $gt: ["$amount", 10000]
+                                }
+                            ]
+                        }
+                    }
+                }
+            ],
+            as: "highOrders"
+        }
+    },
+    {
+        $project: {
+            _id: 1,
+            name: 1,
+            highOrders: 1
+        }
+    }
+])
+
+
+
+
+// First $facet Question
+// ==========================================
+// Collection::
+// [
+//   { name: "John", salary: 90000, department: "IT" },
+//   { name: "Sara", salary: 40000, department: "HR" },
+//   { name: "Mike", salary: 120000, department: "IT" },
+//   { name: "Anna", salary: 35000, department: "HR" }
+// ]
+// Requirement:
+// Return in one query:
+// {
+//   highSalaryUsers: salary > 50000,
+//   lowSalaryUsers: salary <= 50000,
+//   departmentStats: total employees per department
+// }
+// Must use:
+// $facet
+// $match
+// $group
+// $project
+User.aggregate([
+    {
+        $facet: {
+            highSalaryUsers: [
+                {
+                    $match: {
+                        salary: { $gt: 50000 }
+                    }
+                },
+                {
+                    $project: {
+                        name: 1,
+                        salary: 1,
+                        department: 1
+                    }
+                }
+            ],
+            lowSalaryUsers: [
+                {
+                    $match: {
+                        salary: { $lte: 50000 }
+                    }
+                },
+                {
+                    $project: {
+                        name: 1,
+                        salary: 1,
+                        department: 1
+                    }
+                }
+            ],
+            departmentStats: [
+                {
+                    $group: {
+                        _id: "$department",
+                        totalEmployees: {
+                            $sum: 1
+                        }
+                    }
+                }
+            ]
+        }
+    }
+])
+// Interview Question:
+// Why did I not use $expr here?
+// {
+//   salary: { $gt: 50000 }
+// }
+// instead of
+// {
+//   $expr: {
+//     $gt: ["$salary", 50000]
+//   }
+// }
+// Answer:-
+// because we are checking condition for fixed value
+// Use normal query operators when comparing with a fixed value
+// {
+//   salary: { $gt: 50000 }
+// }
+// Here MongoDB can directly check:
+// salary > 50000
+// No expression evaluation is needed.
+
+// Use $expr when comparing fields, variables, or expressions
+// Field vs Field:
+// {
+//   $expr: {
+//     $gt: ["$salary", "$bonus"]
+//   }
+// }
+// Meaning:
+// salary > bonus
+
+
+
+
+// BUCKET:
+// ==============================================
+// [
+//   { name: "John", age: 25 },
+//   { name: "Sara", age: 28 },
+//   { name: "Mike", age: 35 },
+//   { name: "Anna", age: 42 },
+//   { name: "Tom", age: 47 }
+// ]
+// input:
+User.aggregate[{
+    $bucket: {
+        groupBy: "$age",
+        boundaries: [20, 30, 40, 50],
+        default: "50+",
+        output: {
+            count: {
+                $sum: 1
+            },
+            users: {
+                $push: "$name"
+            }
+        }
+    }
+}]
+// output:
+// [
+//   {
+//     _id: 20,
+//     count: 2,
+//     users: ["John", "Sara"]
+//   },
+//   {
+//     _id: 30,
+//     count: 1,
+//     users: ["Mike"]
+//   },
+//   {
+//     _id: 40,
+//     count: 2,
+//     users: ["Anna", "Tom"]
+//   }
+// ]
+
+
+
+
+// Collections
+// ============================================
+// users
+// [
+//   {
+//     _id: 1,
+//     name: "John",
+//     age: 25
+//   },
+//   {
+//     _id: 2,
+//     name: "Sara",
+//     age: 35
+//   },
+//   {
+//     _id: 3,
+//     name: "Mike",
+//     age: 45
+//   }
+// ]
+// orders
+// [
+//   {
+//     _id: 101,
+//     userId: 1,
+//     amount: 1000
+//   },
+//   {
+//     _id: 102,
+//     userId: 1,
+//     amount: 2000
+//   },
+//   {
+//     _id: 103,
+//     userId: 2,
+//     amount: 1500
+//   },
+//   {
+//     _id: 104,
+//     userId: 3,
+//     amount: 3000
+//   },
+//   {
+//     _id: 105,
+//     userId: 3,
+//     amount: 4000
+//   }
+// ]
+// Requirement
+// Return:
+// {
+//   topCustomers: [
+//     {
+//       name: "Mike",
+//       totalSpent: 7000
+//     },
+//     {
+//       name: "John",
+//       totalSpent: 3000
+//     }
+//   ],
+//   ageDistribution: [
+//     {
+//       _id: 20,
+//       count: 1
+//     },
+//     {
+//       _id: 30,
+//       count: 1
+//     },
+//     {
+//       _id: 40,
+//       count: 1
+//     }
+//   ]
+// }
+// Must Use:-
+// $lookup
+// $unwind
+// $group
+// $sort
+// $limit
+// $facet
+// $bucket
+User.aggregate([
+  {
+    $lookup: {
+      from: "orders",
+      localField: "_id",
+      foreignField: "userId",
+      as: "order"
+    }
+  },
+  {
+    $unwind: "$order"
+  },
+  {
+    $group: {
+      _id: "$_id",
+      name: {
+        $first: "$name"
+      },
+      age: {
+        $first: "$age"
+      },
+      totalSpent: {
+        $sum: "$order.amount"
+      }
+    }
+  },
+  {
+    $facet: {
+      topCustomers: [
+        {
+          $sort: {
+            totalSpent: -1
+          }
+        },
+        {
+          $limit: 2
+        },
+        {
+          $project: {
+            _id: 0,
+            name: 1,
+            totalSpent: 1
+          }
+        }
+      ],
+      ageDistribution: [
+        {
+          $bucket: {
+            groupBy: "$age",
+            boundaries: [20, 30, 40, 50],
+            default: "50+",
+            output: {
+              count: {
+                $sum: 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+])
