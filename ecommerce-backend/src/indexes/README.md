@@ -1,4 +1,4 @@
-// The Problem: 50 Million Users
+## The Problem: 50 Million Users
 // Imagine you have:
 // 50 MILLION user documents
 // {
@@ -21,7 +21,7 @@
 // Simple query = crashes your app
 
 const User;
-// 1. Proper Indexes
+## 1. Proper Indexes
 // =========================================
 // Which Indexes to Create:
 const UserSchema = new mongoose.Schema({
@@ -75,7 +75,7 @@ const result2 = await User.find({ email: "john@example.com" })
 // executionTimeMillis: 2
 
 
-// 2. Pagination
+## 2. Pagination
 // ====================================
 // NEVER load all 50M users at once!
 
@@ -166,7 +166,7 @@ async function getUsers(lastLogin = null, lastId = null, limit = 50) {
 // BEST for 50M users! Uses indexes for sorting
 
 
-// 3. Projection (SELECT Only What You Need)
+## 3. Projection (SELECT Only What You Need)
 // ===============================================
 // NEVER SELECT ALL FIELDS for 50M users!
 
@@ -207,7 +207,7 @@ const users2 = await User.find({ isActive: true })
 // 50M users = 25GB
 
 
-// 4. Aggregation Optimization
+## 4. Aggregation Optimization
 // =================================================
 // Bad Aggregation:
 // Processes ALL 50M users
@@ -265,7 +265,7 @@ const result = await User.aggregate([
 ], { allowDiskUse: true }); // Allows using disk if memory is full
 
 
-// 5. Sharding (For Very Large Data)
+## 5. Sharding (For Very Large Data)
 // =========================================
 // When to Shard: When a single server can't handle:
 // Data size > 1TB
@@ -335,7 +335,7 @@ sh.shardCollection("myDB.users", { "_id": "hashed" });
 // Best for even distribution, but range queries are slow
 
 
-// 6. Replica Set for Availability
+## 6. Replica Set for Availability
 // ==============================================
 // Replica Set = Multiple copies of your data for redundancy.
 
