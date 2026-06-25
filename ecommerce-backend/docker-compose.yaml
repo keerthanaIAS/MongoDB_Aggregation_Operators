@@ -19,3 +19,49 @@ services:
 
 volumes:
   mongo-data:
+
+# Sharding + Replica set:
+# version: '3.8'
+# services:
+#   # Config Server Replica Set
+#   configsvr1:
+#     image: mongo:7
+#     command: mongod --configsvr --replSet configReplSet --port 27019
+#     ports:
+#       - "27019:27019"
+
+#   # Shard 1 Replica Set  
+#   shard1a:
+#     image: mongo:7
+#     command: mongod --shardsvr --replSet shard1ReplSet --port 27018
+#     ports:
+#       - "27018:27018"
+
+#   shard1b:
+#     image: mongo:7
+#     command: mongod --shardsvr --replSet shard1ReplSet --port 27018
+#     # No port mapping - internal only
+
+#   # Shard 2 Replica Set
+#   shard2a:
+#     image: mongo:7
+#     command: mongod --shardsvr --replSet shard2ReplSet --port 27018
+#     ports:
+#       - "27028:27018"
+
+#   shard2b:
+#     image: mongo:7
+#     command: mongod --shardsvr --replSet shard2ReplSet --port 27018
+
+#   # Mongos Router
+#   mongos:
+#     image: mongo:7
+#     command: mongos --configdb configReplSet/configsvr1:27019 --bind_ip_all
+#     ports:
+#       - "27017:27017"
+#     depends_on:
+#       - configsvr1
+#       - shard1a
+#       - shard1b
+#       - shard2a
+#       - shard2b

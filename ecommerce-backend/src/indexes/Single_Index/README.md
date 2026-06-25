@@ -6712,3 +6712,3035 @@ Wildcard	        Index unknown/dynamic fields
 Hidden	            Test index removal safely
 Case-Insensitive	Ignore letter casing
 
+
+
+# hashed index properly:
+-------------------------------------------
+## Sharding:
+┌──────────────────────────────────────────────────────┐
+│                   Sharded Cluster                     │
+│                                                       │
+│  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐
+│  │   Shard 1     │  │   Shard 2     │  │   Shard 3     │
+│  │               │  │               │  │               │
+│  │ Doc1          │  │ Doc3          │  │ Doc5          │
+│  │ Doc2          │  │ Doc4          │  │ Doc6          │
+│  │               │  │               │  │               │
+│  │ DIFFERENT     │  │ DIFFERENT     │  │ DIFFERENT     │
+│  │ DATA          │  │ DATA          │  │ DATA          │
+│  └───────────────┘  └───────────────┘  └───────────────┘
+│                                                       │
+│  Each shard holds DIFFERENT subset of data            │
+│  Purpose: Horizontal Scaling + Performance            │
+└──────────────────────────────────────────────────────┘
+
+## replica:
+┌─────────────────────────────────────────┐
+│              Replica Set                 │
+│                                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐
+│  │ PRIMARY  │  │SECONDARY │  │SECONDARY │
+│  │          │  │          │  │          │
+│  │ Doc1     │  │ Doc1     │  │ Doc1     │
+│  │ Doc2     │  │ Doc2     │  │ Doc2     │
+│  │ Doc3     │  │ Doc3     │  │ Doc3     │
+│  │ Doc4     │  │ Doc4     │  │ Doc4     │
+│  │ ALL DATA │  │ ALL DATA │  │ ALL DATA │
+│  └──────────┘  └──────────┘  └──────────┘
+│                                          │
+│  SAME DATA everywhere                    │
+│  Purpose: High Availability + Failover   │
+└─────────────────────────────────────────┘
+
+## Visual Side-by-Side:
+     REPLICATION (Same Data Everywhere)                   SHARDING (Different Data)
+        
+   Primary          Secondary-1  Secondary-2              Shard-1    Shard-2    Shard-3
+ ┌──────────┐     ┌──────────┐  ┌──────────┐           ┌────────┐ ┌────────┐ ┌────────┐
+ │ A B C D  │     │ A B C D  │  │ A B C D  │           │ A  B   │ │ C  D   │ │ E  F   │
+ │ E F G H  │     │ E F G H  │  │ E F G H  │           │ G      │ │ H  I   │ │ J  K   │
+ │ I J K L  │     │ I J K L  │  │ I J K L  │           │        │ │        │ │ L      │
+ │          │     │          │  │          │           │        │ │        │ │        │
+ │ 12 docs  │     │ 12 docs  │  │ 12 docs  │           │ 4 docs │ │ 4 docs │ │ 4 docs │
+ └──────────┘     └──────────┘  └──────────┘           └────────┘ └────────┘ └────────┘
+         
+ If Primary dies:                                       If Shard-2 dies:
+ Secondary takes over                                   Data C,D,H,I is LOST
+ (no data loss)                                         (need replica set per shard)
+
+ ### Production Architecture (Combined):
+ ┌────────────────────────────────────────────────────────────────┐
+│                       Sharded Cluster                          │
+│                                                                │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│  │   Shard 1        │  │   Shard 2        │  │   Shard 3        │
+│  │  (Replica Set)   │  │  (Replica Set)   │  │  (Replica Set)   │
+│  │                  │  │                  │  │                  │
+│  │ Primary Sec1 Sec2│  │ Primary Sec1 Sec2│  │ Primary Sec1 Sec2│
+│  │ ┌────┐ ┌───┐ ┌──┐│  │ ┌────┐ ┌───┐ ┌──┐│  │ ┌────┐ ┌───┐ ┌──┐│
+│  │ │A B │ │A B│ │AB││  │ │C D │ │C D│ │CD││  │ │E F │ │E F│ │EF││
+│  │ │G   │ │G  │ │G ││  │ │H I │ │H I│ │HI││  │ │J K │ │J K│ │JK││
+│  │ │    │ │   │ │  ││  │ │    │ │   │ │  ││  │ │L   │ │L  │ │L ││
+│  │ └────┘ └───┘ └──┘│  │ └────┘ └───┘ └──┘│  │ └────┘ └───┘ └──┘│
+│  └──────────────────┘  └──────────────────┘  └──────────────────┘
+│                                                                │
+│  Each Shard = Replica Set (HA for that shard's data)          │
+│  Each Shard holds DIFFERENT data (scaling)                    │
+└────────────────────────────────────────────────────────────────┘
+
+Interview Answer:-
+
+Q: Sharding vs Replication?
+A: Replication = Same data everywhere (HA + failover)
+   Sharding = Different data per shard (scaling)
+   
+Q: Do they combine?
+A: Yes! Each shard SHOULD be a replica set
+
+Q: What happens if shard dies without replica?
+A: That portion of data is LOST
+
+Q: What happens if primary dies in replica set?
+A: Secondary auto-promotes, no data loss
+
+### Hashed Index Deep Dive
+1. Why Hashed Index Exists
+The Sharding Problem
+javascript
+// Regular index on email for sharding
+sh.shardCollection("indexpoc.users", { email: 1 })
+
+// What happens:
+// user1@gmail.com → Shard A
+// user2@gmail.com → Shard B
+// user3@gmail.com → Shard C
+// ...
+// user999999@gmail.com → Same shard as similar emails?
+
+Problem with regular index for sharding:
+// Emails are sequential/similar
+"aaron@gmail.com"     → Shard 1
+"aaron1@gmail.com"    → Shard 1 (nearby in sort order)
+"aaron2@gmail.com"    → Shard 1
+"abraham@gmail.com"   → Shard 1
+
+// User IDs (ObjectId) are time-based
+ObjectId("507f1f77bcf86cd799439011")  // All from same second → Shard 1
+ObjectId("507f1f77bcf86cd799439012")  // Same shard
+ObjectId("507f1f77bcf86cd799439013")  // Same shard
+
+Result: Hot shard
+
+Shard 1: 80% data  (all new users go here)
+Shard 2: 10% data
+Shard 3: 10% data
+
+### Hashed Index Fix:
+sh.shardCollection("indexpoc.users", { email: "hashed" })
+
+// Hash function distributes randomly
+"aaron@gmail.com"     → Hash: 783462891 → Shard 2
+"aaron1@gmail.com"    → Hash: 125674389 → Shard 3
+"aaron2@gmail.com"    → Hash: 987654321 → Shard 1
+"abraham@gmail.com"   → Hash: 456789123 → Shard 3
+
+// Even distribution
+Shard 1: 33%
+Shard 2: 33%
+Shard 3: 33%
+
+2. How MongoDB Stores Hashed Index
+*Regular B-Tree Index:-*
+db.users.createIndex({ email: 1 })
+
+// B-Tree structure (sorted alphabetically):
+          [m]
+         /   \
+    [a-l]       [n-z]
+    /    \     /      \
+[a-f] [g-l]   [n-s]   [t-z]
+  |      |       |        |
+"aaron" "mike" "nancy" "zack"
+"bob"   "mongo" "oscar" "zoe"
+
+*Hashed Index (Same B-Tree, Different Keys):-*
+db.users.createIndex({ email: "hashed" })
+
+// MongoDB does internally:
+// 1. Takes email: "aaron@gmail.com"
+// 2. Applies hash function: hash("aaron@gmail.com") → 783462891
+// 3. Stores 783462891 in B-Tree instead of "aaron@gmail.com"
+
+// B-Tree structure (sorted by hash NUMBER):
+              [500000000]
+             /           \
+    [100000000-499M]     [500M-999999999]
+         /        \           /         \
+   [100M-299M] [300M-499M] [500M-749M]  [750M-999M]
+       |            |           |           |
+   125674389    456789123   783462891   987654321
+   (aaron1)     (abraham)   (aaron)    (aaron2)
+Same B-Tree, different sort order!
+
+### 3. Why Equality Works
+*Query Execution:*
+db.users.find({ email: "aaron@gmail.com" })
+
+// Step 1: MongoDB hashes the query value
+hash("aaron@gmail.com") → 783462891
+
+// Step 2: B-Tree lookup (same as regular index)
+Search tree for 783462891:
+  Check root: 500000000
+  783462891 > 500000000 → Go right
+  Check node: 500M-999M
+  Check: 750M-999M
+  783462891 is here → Found in O(log n)
+
+// Step 3: Get document pointer
+Index entry: { 783462891 → ObjectId("...") }
+
+// Step 4: Fetch document
+
+*Explain Output*
+db.users.find({ email: "aaron@gmail.com" }).explain("executionStats")
+
+{
+  executionStats: {
+    stage: "IXSCAN",              // ✅ Same as regular index
+    indexName: "email_hashed",
+    totalKeysExamined: 1,         // ✅ O(log n) lookup
+    totalDocsExamined: 1          // ✅ Single document
+  }
+}
+Equality = Exact hash match = B-Tree works perfectly
+
+### Terminal logs:
+test> use indexpoc
+switched to db indexpoc
+indexpoc> db.users.drop()
+true
+indexpoc> for(let i=1;i<=100000;i++){
+| 
+|     db.users.insertOne({
+|         userId:i,
+|         name:`User${i}`
+|     })
+| 
+| }
+{
+  acknowledged: true,
+  insertedId: ObjectId('6a3cb57f74a230a9ccd32e5a')
+}
+indexpoc> db.users.findOne()
+{ _id: ObjectId('6a3cb55574a230a9ccd1a7bb'), userId: 1, name: 'User1' }
+indexpoc> db.users.find({
+|     userId:50000
+| }).explain("executionStats")
+{
+  explainVersion: '1',
+  queryPlanner: {
+    namespace: 'indexpoc.users',
+    parsedQuery: { userId: { '$eq': 50000 } },
+    indexFilterSet: false,
+    queryHash: '69BEE08A',
+    planCacheShapeHash: '69BEE08A',
+    planCacheKey: 'E3E2F96D',
+    optimizationTimeMillis: 0,
+    maxIndexedOrSolutionsReached: false,
+    maxIndexedAndSolutionsReached: false,
+    maxScansToExplodeReached: false,
+    prunedSimilarIndexes: false,
+    winningPlan: {
+      isCached: false,
+      stage: 'COLLSCAN',
+      filter: { userId: { '$eq': 50000 } },
+      direction: 'forward'
+    },
+    rejectedPlans: []
+  },
+  executionStats: {
+    executionSuccess: true,
+    nReturned: 1,
+    executionTimeMillis: 41,
+    totalKeysExamined: 0,
+    totalDocsExamined: 100000,
+    executionStages: {
+      isCached: false,
+      stage: 'COLLSCAN',
+      filter: { userId: { '$eq': 50000 } },
+      nReturned: 1,
+      executionTimeMillisEstimate: 39,
+      works: 100001,
+      advanced: 1,
+      needTime: 99999,
+      needYield: 0,
+      saveState: 3,
+      restoreState: 3,
+      isEOF: 1,
+      direction: 'forward',
+      docsExamined: 100000
+    }
+  },
+  queryShapeHash: 'E4776CD650FE95C37B9037A6A9C739C922242981EF2369541745B58B5F5F4849',
+  command: { find: 'users', filter: { userId: 50000 }, '$db': 'indexpoc' },
+  serverInfo: {
+    host: '2d29da6dbb3f',
+    port: 27017,
+    version: '8.2.11',
+    gitVersion: 'ee01d36638a00a07a6aa42ee80a125890f11aeed'
+  },
+  serverParameters: {
+    internalQueryFacetBufferSizeBytes: 104857600,
+    internalQueryFacetMaxOutputDocSizeBytes: 104857600,
+    internalLookupStageIntermediateDocumentMaxSizeBytes: 104857600,
+    internalDocumentSourceGroupMaxMemoryBytes: 104857600,
+    internalQueryMaxBlockingSortMemoryUsageBytes: 104857600,
+    internalQueryProhibitBlockingMergeOnMongoS: 0,
+    internalQueryMaxAddToSetBytes: 104857600,
+    internalDocumentSourceSetWindowFieldsMaxMemoryBytes: 104857600,
+    internalQueryFrameworkControl: 'trySbeRestricted',
+    internalQueryPlannerIgnoreIndexWithCollationForRegex: 1
+  },
+  ok: 1
+}
+indexpoc> db.users.createIndex({
+|     userId:"hashed"
+| })
+userId_hashed
+indexpoc> db.users.getIndexes()
+[
+  { v: 2, key: { _id: 1 }, name: '_id_' },
+  { v: 2, key: { userId: 'hashed' }, name: 'userId_hashed' }
+]
+indexpoc> db.users.find({
+|     userId:50000
+| }).explain("executionStats")
+{
+  explainVersion: '1',
+  queryPlanner: {
+    namespace: 'indexpoc.users',
+    parsedQuery: { userId: { '$eq': 50000 } },
+    indexFilterSet: false,
+    queryHash: '69BEE08A',
+    planCacheShapeHash: '69BEE08A',
+    planCacheKey: 'FCA78324',
+    optimizationTimeMillis: 0,
+    maxIndexedOrSolutionsReached: false,
+    maxIndexedAndSolutionsReached: false,
+    maxScansToExplodeReached: false,
+    prunedSimilarIndexes: false,
+    winningPlan: {
+      isCached: false,
+      stage: 'FETCH',
+      filter: { userId: { '$eq': 50000 } },
+      inputStage: {
+        stage: 'IXSCAN',
+        keyPattern: { userId: 'hashed' },
+        indexName: 'userId_hashed',
+        isMultiKey: false,
+        isUnique: false,
+        isSparse: false,
+        isPartial: false,
+        indexVersion: 2,
+        direction: 'forward',
+        indexBounds: { userId: [ '[1009823700664732862, 1009823700664732862]' ] }
+      }
+    },
+    rejectedPlans: []
+  },
+  executionStats: {
+    executionSuccess: true,
+    nReturned: 1,
+    executionTimeMillis: 2,
+    totalKeysExamined: 1,
+    totalDocsExamined: 1,
+    executionStages: {
+      isCached: false,
+      stage: 'FETCH',
+      filter: { userId: { '$eq': 50000 } },
+      nReturned: 1,
+      executionTimeMillisEstimate: 0,
+      works: 2,
+      advanced: 1,
+      needTime: 0,
+      needYield: 0,
+      saveState: 0,
+      restoreState: 0,
+      isEOF: 1,
+      docsExamined: 1,
+      alreadyHasObj: 0,
+      inputStage: {
+        stage: 'IXSCAN',
+        nReturned: 1,
+        executionTimeMillisEstimate: 0,
+        works: 2,
+        advanced: 1,
+        needTime: 0,
+        needYield: 0,
+        saveState: 0,
+        restoreState: 0,
+        isEOF: 1,
+        keyPattern: { userId: 'hashed' },
+        indexName: 'userId_hashed',
+        isMultiKey: false,
+        isUnique: false,
+        isSparse: false,
+        isPartial: false,
+        indexVersion: 2,
+        direction: 'forward',
+        indexBounds: { userId: [ '[1009823700664732862, 1009823700664732862]' ] },
+        keysExamined: 1,
+        seeks: 1,
+        dupsTested: 0,
+        dupsDropped: 0
+      }
+    }
+  },
+  queryShapeHash: 'E4776CD650FE95C37B9037A6A9C739C922242981EF2369541745B58B5F5F4849',
+  command: { find: 'users', filter: { userId: 50000 }, '$db': 'indexpoc' },
+  serverInfo: {
+    host: '2d29da6dbb3f',
+    port: 27017,
+    version: '8.2.11',
+    gitVersion: 'ee01d36638a00a07a6aa42ee80a125890f11aeed'
+  },
+  serverParameters: {
+    internalQueryFacetBufferSizeBytes: 104857600,
+    internalQueryFacetMaxOutputDocSizeBytes: 104857600,
+    internalLookupStageIntermediateDocumentMaxSizeBytes: 104857600,
+    internalDocumentSourceGroupMaxMemoryBytes: 104857600,
+    internalQueryMaxBlockingSortMemoryUsageBytes: 104857600,
+    internalQueryProhibitBlockingMergeOnMongoS: 0,
+    internalQueryMaxAddToSetBytes: 104857600,
+    internalDocumentSourceSetWindowFieldsMaxMemoryBytes: 104857600,
+    internalQueryFrameworkControl: 'trySbeRestricted',
+    internalQueryPlannerIgnoreIndexWithCollationForRegex: 1
+  },
+  ok: 1
+}
+indexpoc> 
+
+### What Actually Happens?
+
+You search:
+{
+   userId:50000
+}
+
+Mongo internally:
+50000
+ ↓
+Hash Function
+ ↓
+879126731
+ ↓
+Index Search
+ ↓
+Document
+
+* You never see the hash.
+* Mongo computes it automatically.
+
+Important
+
+### Mongo is NOT storing:
+1
+2
+3
+4
+5
+inside index.
+
+It stores:
+88772
+11223
+99881
+44556
+...
+(Hash values)
+* Not actual values.
+
+## Terminal log for Test range query:
+indexpoc> db.users.find({
+|    userId:{
+|       $gt:50000
+|    }
+| }).explain("executionStats")
+{
+  explainVersion: '1',
+  queryPlanner: {
+    namespace: 'indexpoc.users',
+    parsedQuery: { userId: { '$gt': 50000 } },
+    indexFilterSet: false,
+    queryHash: 'A248A23D',
+    planCacheShapeHash: 'A248A23D',
+    planCacheKey: '2509CB66',
+    optimizationTimeMillis: 0,
+    maxIndexedOrSolutionsReached: false,
+    maxIndexedAndSolutionsReached: false,
+    maxScansToExplodeReached: false,
+    prunedSimilarIndexes: false,
+    winningPlan: {
+      isCached: false,
+      stage: 'COLLSCAN',
+      filter: { userId: { '$gt': 50000 } },
+      direction: 'forward'
+    },
+    rejectedPlans: []
+  },
+  executionStats: {
+    executionSuccess: true,
+    nReturned: 50000,
+    executionTimeMillis: 43,
+    totalKeysExamined: 0,
+    totalDocsExamined: 100000,
+    executionStages: {
+      isCached: false,
+      stage: 'COLLSCAN',
+      filter: { userId: { '$gt': 50000 } },
+      nReturned: 50000,
+      executionTimeMillisEstimate: 21,
+      works: 100001,
+      advanced: 50000,
+      needTime: 50000,
+      needYield: 0,
+      saveState: 2,
+      restoreState: 2,
+      isEOF: 1,
+      direction: 'forward',
+      docsExamined: 100000
+    }
+  },
+  queryShapeHash: '68DC10F05CA0EE99B5FFA8AE8A9030B9F369C9EABB9268F709568D1C3AE0A90A',
+  command: {
+    find: 'users',
+    filter: { userId: { '$gt': 50000 } },
+    '$db': 'indexpoc'
+  },
+  serverInfo: {
+    host: '2d29da6dbb3f',
+    port: 27017,
+    version: '8.2.11',
+    gitVersion: 'ee01d36638a00a07a6aa42ee80a125890f11aeed'
+  },
+  serverParameters: {
+    internalQueryFacetBufferSizeBytes: 104857600,
+    internalQueryFacetMaxOutputDocSizeBytes: 104857600,
+    internalLookupStageIntermediateDocumentMaxSizeBytes: 104857600,
+    internalDocumentSourceGroupMaxMemoryBytes: 104857600,
+    internalQueryMaxBlockingSortMemoryUsageBytes: 104857600,
+    internalQueryProhibitBlockingMergeOnMongoS: 0,
+    internalQueryMaxAddToSetBytes: 104857600,
+    internalDocumentSourceSetWindowFieldsMaxMemoryBytes: 104857600,
+    internalQueryFrameworkControl: 'trySbeRestricted',
+    internalQueryPlannerIgnoreIndexWithCollationForRegex: 1
+  },
+  ok: 1
+}
+indexpoc> 
+
+### Why It Performs Poorly
+Normal B-Tree Index:
+1
+2
+3
+4
+5
+6
+7
+8
+
+Mongo can jump:
+    Start at 50001
+    Continue forward
+* Efficient.
+
+Hashed Index:
+1 -> 88772
+2 -> 11223
+3 -> 99881
+4 -> 44556
+5 -> 22119
+* Now ordering is gone.
+
+Mongo cannot do:
+50001
+50002
+50003
+* because hashes are random.
+
+### Expected explain:
+You may see:
+COLLSCAN
+or
+IXSCAN + FETCH
+* with many examined documents.
+* Depends on version.
+
+### Interview Question:-
+Which query benefits?
+{
+   userId:5000
+}
+✅ Good
+{
+   userId:{
+      $in:[1,2,3,4]
+   }
+}
+✅ Usually Good
+{
+   userId:{
+      $gt:5000
+   }
+}
+❌ Bad
+.sort({
+   userId:1
+})
+❌ Bad
+
+### Why Sharding Loves Hashed Index:-
+Without hash:
+Shard1 -> 1 to 300000
+Shard2 -> 300001 to 600000
+Shard3 -> 600001 to 1000000
+
+New users:
+1000001
+1000002
+1000003
+
+always go to:
+Shard3
+* Hot shard.
+
+With hashed shard key:
+1000001 -> random
+1000002 -> random
+1000003 -> random
+
+Distribution:
+Shard1 : 33%
+Shard2 : 33%
+Shard3 : 34%
+* Balanced.
+
+### Senior-Level Takeaway:-
+Hashed Index is not a query optimization index first.
+
+Think of it as:
+Single Index      -> Fast lookups
+Compound Index    -> Filter + Sort
+Text Index        -> Search
+TTL Index         -> Auto delete
+Unique Index      -> Data integrity
+Hashed Index      -> Even data distribution for sharding
+
+
+# Word Sharding:
+-----------------
+## What is a Cluster?
+A cluster is simply:
+Multiple servers working together
+as one database system
+
+### Instead of:
+MongoDB
+  |
+Server-1
+
+### You have:
+MongoDB Cluster
+    |
+Server-1
+Server-2
+Server-3
+
+Applications see:
+mongodb://cluster-url
+* not individual servers.
+
+### Why Not One Server?
+Suppose:
+10 million users
+500 GB data
+10,000 requests/sec
+
+One server may eventually hit:
+CPU limit
+RAM limit
+Disk limit
+Network limit
+* Then you need multiple servers.
+
+### MongoDB Has Two Different Scaling Concepts:
+Many people confuse these.
+1. Replica Set
+Purpose:
+ - High Availability
+Example:
+Primary
+  |
+Secondary
+  |
+Secondary
+Writes:-
+App
+ ↓
+Primary
+* Only primary accepts writes.
+Replication:-
+Primary
+ ↓
+Secondary
+ ↓
+Secondary
+* Data copied.
+
+## If Primary Dies:
+Mongo elects another primary.
+Old Primary ❌
+Secondary-1 becomes Primary ✅
+Application continues.
+
+## Replica Set Solves
+✅ High availability
+✅ Disaster recovery
+✅ Read scaling
+
+## Replica Set Does NOT Solve
+❌ Huge storage
+❌ Huge write traffic
+Because every server still contains:
+All Data
+
+2. Sharding
+Purpose:
+Horizontal Scaling
+
+Instead of:
+ - Server1
+ - 1 million users
+ - You split data.
+
+Shard1
+Users
+1 - 300k
+
+Shard2
+Users
+300k - 600k
+Shard3
+
+Users
+600k - 1m
+
+Now storage becomes:
+Shard1 = 100 GB
+Shard2 = 100 GB
+Shard3 = 100 GB
+
+instead of:
+One server = 300 GB
+
+What Does Sharding Solve?
+✅ More storage
+✅ More write throughput
+✅ More read throughput
+✅ Bigger datasets
+
+#### Real Mongo Cluster
+Production cluster:
+
+                Router (mongos)
+                     |
+      -----------------------------
+      |             |            |
+   Shard1        Shard2       Shard3
+      |             |            |
+ Replica Set    Replica Set   Replica Set
+
+Notice:-
+Shard
+   +
+Replica Set
+* Usually both.
+
+Example:-
+Let's say:
+Instagram
+
+has:
+2 billion users
+* One machine cannot hold everything.
+* Mongo splits users.
+
+Shard1 -> Some users
+Shard2 -> Some users
+Shard3 -> Some users
+
+Each shard may itself contain:
+Primary
+Secondary
+Secondary
+* for reliability.
+
+#### Where Does Hashed Index Come In?
+Suppose shard key:
+{
+   userId: 1
+}
+
+New users:
+1000001
+1000002
+1000003
+* keep going to last shard.
+* Bad.
+
+Mongo uses:
+{
+   userId: "hashed"
+}
+
+Now:
+1000001 -> random shard
+1000002 -> random shard
+1000003 -> random shard
+* Balanced.
+
+
+# Sharding and replica test terminal logs:
+------------------------------------------
+keerthana@Keerthanas-MacBook-Air ecommerce-backend % docker compose down -v
+WARN[0000] /Users/keerthana/Desktop/MongoDB_Aggregation_Operators/ecommerce-backend/docker-compose.yaml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion 
+[+] Running 7/7
+ ✔ Container ecommerce-backend-mongos-1      Removed                                                                                 0.0s 
+ ✔ Container ecommerce-backend-shard2b-1     Removed                                                                                 0.4s 
+ ✔ Container ecommerce-backend-shard1a-1     Removed                                                                                 0.4s 
+ ✔ Container ecommerce-backend-shard1b-1     Removed                                                                                 0.4s 
+ ✔ Container ecommerce-backend-configsvr1-1  Removed                                                                                 0.3s 
+ ✔ Container ecommerce-backend-shard2a-1     Removed                                                                                 0.3s 
+ ! Network ecommerce-backend_default         Resource is still in use                                                                0.0s 
+keerthana@Keerthanas-MacBook-Air ecommerce-backend % docker rm -f $(docker ps -aq)
+dd32a54c1e9e
+2d29da6dbb3f
+keerthana@Keerthanas-MacBook-Air ecommerce-backend % docker compose down -v       
+WARN[0000] /Users/keerthana/Desktop/MongoDB_Aggregation_Operators/ecommerce-backend/docker-compose.yaml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion 
+[+] Running 1/1
+ ✔ Network ecommerce-backend_default  Removed                                                                                        0.2s 
+keerthana@Keerthanas-MacBook-Air ecommerce-backend % docker-compose up -d         
+WARN[0000] /Users/keerthana/Desktop/MongoDB_Aggregation_Operators/ecommerce-backend/docker-compose.yaml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion 
+[+] Running 7/7
+ ✔ Network ecommerce-backend_default         Created                                                                                 0.0s 
+ ✔ Container ecommerce-backend-shard1b-1     Started                                                                                 0.5s 
+ ✔ Container ecommerce-backend-shard1a-1     Started                                                                                 0.5s 
+ ✔ Container ecommerce-backend-configsvr1-1  Started                                                                                 0.5s 
+ ✔ Container ecommerce-backend-shard2b-1     Started                                                                                 0.5s 
+ ✔ Container ecommerce-backend-shard2a-1     Started                                                                                 0.5s 
+ ✔ Container ecommerce-backend-mongos-1      Started                                                                                 0.5s 
+keerthana@Keerthanas-MacBook-Air ecommerce-backend % sleep 30
+keerthana@Keerthanas-MacBook-Air ecommerce-backend % chmod +x setup.sh
+./setup.sh
+Waiting for containers...
+{ ok: 1 }
+{ ok: 1 }
+{ ok: 1 }
+{
+  shardAdded: 'shard2ReplSet',
+  ok: 1,
+  '$clusterTime': {
+    clusterTime: Timestamp({ t: 1782367071, i: 20 }),
+    signature: {
+      hash: Binary.createFromBase64('AAAAAAAAAAAAAAAAAAAAAAAAAAA=', 0),
+      keyId: Long('0')
+    }
+  },
+  operationTime: Timestamp({ t: 1782367071, i: 10 })
+}
+✅ Cluster Ready! Connect: mongosh --port 27017
+
+## error stage:
+keerthana@Keerthanas-MacBook-Air indexes % mongosh --port 27017
+zsh: command not found: mongosh
+### resolve:
+Step 1: Install mongosh (Mac)
+bash
+# Install via Homebrew
+brew install mongosh
+# Verify
+mongosh --version
+
+## after install connected mongosh terminal logs:
+keerthana@Keerthanas-MacBook-Air indexes % mongosh --port 27017
+Current Mongosh Log ID: 6a3cc5fa28468e78217bc0dd
+Connecting to:          mongodb://127.0.0.1:27017/?directConnection=true&serverSelectionTimeoutMS=2000&appName=mongosh+2.8.3
+Using MongoDB:          7.0.37
+Using Mongosh:          2.8.3
+
+For mongosh info see: https://www.mongodb.com/docs/mongodb-shell/
+
+
+To help improve our products, anonymous usage data is collected and sent to MongoDB periodically (https://www.mongodb.com/legal/privacy-policy).
+You can opt-out by running the disableTelemetry() command.
+
+------
+   The server generated these startup warnings when booting
+   2026-06-25T05:56:31.149+00:00: Access control is not enabled for the database. Read and write access to data and configuration is unrestricted
+------
+
+[direct: mongos] test> sh.status()
+shardingVersion
+{ _id: 1, clusterId: ObjectId('6a3cc34ddd9fa1ef53a3cf85') }
+---
+shards
+[
+  {
+    _id: 'shard1ReplSet',
+    host: 'shard1ReplSet/shard1a:27018,shard1b:27018',
+    state: 1,
+    topologyTime: Timestamp({ t: 1782367068, i: 8 })
+  },
+  {
+    _id: 'shard2ReplSet',
+    host: 'shard2ReplSet/shard2a:27018,shard2b:27018',
+    state: 1,
+    topologyTime: Timestamp({ t: 1782367071, i: 8 })
+  }
+]
+---
+active mongoses
+[ { '7.0.37': 1 } ]
+---
+autosplit
+{ 'Currently enabled': 'yes' }
+---
+balancer
+{
+  'Currently enabled': 'yes',
+  'Currently running': 'no',
+  'Failed balancer rounds in last 5 attempts': 0,
+  'Migration Results for the last 24 hours': 'No recent migrations'
+}
+---
+shardedDataDistribution
+[
+  {
+    ns: 'indexpoc.users',
+    shards: [
+      {
+        shardName: 'shard1ReplSet',
+        numOrphanedDocs: 0,
+        numOwnedDocuments: 5053,
+        ownedSizeBytes: 444664,
+        orphanedSizeBytes: 0
+      },
+      {
+        shardName: 'shard2ReplSet',
+        numOrphanedDocs: 0,
+        numOwnedDocuments: 4947,
+        ownedSizeBytes: 435336,
+        orphanedSizeBytes: 0
+      }
+    ]
+  },
+  {
+    ns: 'config.system.sessions',
+    shards: [
+      {
+        shardName: 'shard1ReplSet',
+        numOrphanedDocs: 0,
+        numOwnedDocuments: 21,
+        ownedSizeBytes: 2079,
+        orphanedSizeBytes: 0
+      }
+    ]
+  }
+]
+---
+databases
+[
+  {
+    database: { _id: 'config', primary: 'config', partitioned: true },
+    collections: {
+      'config.system.sessions': {
+        shardKey: { _id: 1 },
+        unique: false,
+        balancing: true,
+        allowMigrations: true,
+        chunkMetadata: [ { shard: 'shard1ReplSet', nChunks: 1 } ],
+        chunks: [
+          { min: { _id: MinKey() }, max: { _id: MaxKey() }, 'on shard': 'shard1ReplSet', 'last modified': Timestamp({ t: 1, i: 0 }) }
+        ],
+        tags: []
+      }
+    }
+  },
+  {
+    database: {
+      _id: 'indexpoc',
+      primary: 'shard2ReplSet',
+      partitioned: false,
+      version: {
+        uuid: UUID('d1ccafc8-135c-4e93-84c8-f9fb18264f6b'),
+        timestamp: Timestamp({ t: 1782367143, i: 1 }),
+        lastMod: 1
+      }
+    },
+    collections: {
+      'indexpoc.users': {
+        shardKey: { email: 'hashed' },
+        unique: false,
+        balancing: true,
+        allowMigrations: true,
+        chunkMetadata: [
+          { shard: 'shard1ReplSet', nChunks: 2 },
+          { shard: 'shard2ReplSet', nChunks: 2 }
+        ],
+        chunks: [
+          { min: { email: MinKey() }, max: { email: Long('-4611686018427387902') }, 'on shard': 'shard2ReplSet', 'last modified': Timestamp({ t: 1, i: 0 }) },
+          { min: { email: Long('-4611686018427387902') }, max: { email: Long('0') }, 'on shard': 'shard2ReplSet', 'last modified': Timestamp({ t: 1, i: 1 }) },
+          { min: { email: Long('0') }, max: { email: Long('4611686018427387902') }, 'on shard': 'shard1ReplSet', 'last modified': Timestamp({ t: 1, i: 2 }) },
+          { min: { email: Long('4611686018427387902') }, max: { email: MaxKey() }, 'on shard': 'shard1ReplSet', 'last modified': Timestamp({ t: 1, i: 3 }) }
+        ],
+        tags: []
+      }
+    }
+  }
+]
+[direct: mongos] test> 
+
+[direct: mongos] test> use indexpoc
+switched to db indexpoc
+[direct: mongos] indexpoc> db.users.getShardDistribution()
+Shard shard2ReplSet at shard2ReplSet/shard2a:27018,shard2b:27018
+{
+  data: '428KiB',
+  docs: 4947,
+  chunks: 2,
+  'estimated data per chunk': '214KiB',
+  'estimated docs per chunk': 2473
+}
+---
+Shard shard1ReplSet at shard1ReplSet/shard1a:27018,shard1b:27018
+{
+  data: '438KiB',
+  docs: 5053,
+  chunks: 2,
+  'estimated data per chunk': '219KiB',
+  'estimated docs per chunk': 2526
+}
+---
+Totals
+{
+  data: '866KiB',
+  docs: 10000,
+  chunks: 4,
+  'Shard shard2ReplSet': [
+    '49.47 % data',
+    '49.47 % docs in cluster',
+    '88B avg obj size on shard'
+  ],
+  'Shard shard1ReplSet': [
+    '50.52 % data',
+    '50.53 % docs in cluster',
+    '88B avg obj size on shard'
+  ]
+}
+[direct: mongos] indexpoc> db.users.aggregate([
+|   { $match: { email: "user5000@gmail.com" } },
+|   { $project: { 
+|       email: 1,
+|       hashValue: { $toHashedIndexKey: "$email" }
+|   }}
+| ])
+[
+  {
+    _id: ObjectId('6a3cc44af407a810591be31d'),
+    email: 'user5000@gmail.com',
+    hashValue: Long('7677552327051713248')                                       -->*This random number decides which shard*
+  }
+]
+[direct: mongos] indexpoc> 
+[direct: mongos] indexpoc> db.users.find({ email: "user5000@gmail.com" }).explain("executionStats")
+{
+  queryPlanner: {
+    mongosPlannerVersion: 1,
+    winningPlan: {
+      stage: 'SINGLE_SHARD',
+      shards: [
+        {
+          shardName: 'shard1ReplSet',
+          connectionString: 'shard1ReplSet/shard1a:27018,shard1b:27018',
+          serverInfo: {
+            host: '5bb057d7a917',
+            port: 27018,
+            version: '7.0.37',
+            gitVersion: '9d30419d900008ba3ecf2a14546b236f2158b65b'
+          },
+          namespace: 'indexpoc.users',
+          indexFilterSet: false,
+          parsedQuery: { email: { '$eq': 'user5000@gmail.com' } },
+          queryHash: '7F1F8B58',
+          planCacheKey: '34D9A51E',
+          optimizationTimeMillis: 0,
+          maxIndexedOrSolutionsReached: false,
+          maxIndexedAndSolutionsReached: false,
+          maxScansToExplodeReached: false,
+          winningPlan: {
+            stage: 'FETCH',
+            filter: { email: { '$eq': 'user5000@gmail.com' } },
+            inputStage: {
+              stage: 'IXSCAN',
+              keyPattern: { email: 'hashed' },                                      -->*// ← Using hashed index*
+              indexName: 'email_hashed',
+              isMultiKey: false,
+              isUnique: false,
+              isSparse: false,
+              isPartial: false,
+              indexVersion: 2,
+              direction: 'forward',
+              indexBounds: {
+                email: [ '[7677552327051713248, 7677552327051713248]' ]
+              }
+            }
+          },
+          rejectedPlans: []
+        }
+      ]
+    }
+  },
+  executionStats: {
+    nReturned: 1,
+    executionTimeMillis: 2,
+    totalKeysExamined: 1,
+    totalDocsExamined: 1,
+    executionStages: {
+      stage: 'SINGLE_SHARD',                  -->*// ← Mongos sent query to ONLY 1 shard*
+      nReturned: 1,
+      executionTimeMillis: 2,
+      totalKeysExamined: 1,
+      totalDocsExamined: 1,
+      totalChildMillis: Long('0'),
+      shards: [
+        {
+          shardName: 'shard1ReplSet',                                                         -->*user5000 is on shard1*// ← This specific shard
+          executionSuccess: true,
+          nReturned: 1,
+          executionTimeMillis: 0,
+          totalKeysExamined: 1,
+          totalDocsExamined: 1,
+          executionStages: {
+            stage: 'FETCH',
+            filter: { email: { '$eq': 'user5000@gmail.com' } },
+            nReturned: 1,
+            executionTimeMillisEstimate: 0,
+            works: 2,
+            advanced: 1,
+            needTime: 0,
+            needYield: 0,
+            saveState: 0,
+            restoreState: 0,
+            isEOF: 1,
+            docsExamined: 1,
+            alreadyHasObj: 0,
+            inputStage: {
+              stage: 'IXSCAN',
+              nReturned: 1,
+              executionTimeMillisEstimate: 0,
+              works: 2,
+              advanced: 1,
+              needTime: 0,
+              needYield: 0,
+              saveState: 0,
+              restoreState: 0,
+              isEOF: 1,
+              keyPattern: { email: 'hashed' },
+              indexName: 'email_hashed',
+              isMultiKey: false,
+              isUnique: false,
+              isSparse: false,
+              isPartial: false,
+              indexVersion: 2,
+              direction: 'forward',
+              indexBounds: {
+                email: [ '[7677552327051713248, 7677552327051713248]' ]                            -->*Looking for EXACT hash match only*
+              },
+              keysExamined: 1,
+              seeks: 1,
+              dupsTested: 0,
+              dupsDropped: 0
+            }
+          }
+        }
+      ]
+    }
+  },
+  serverInfo: {
+    host: '46adeecca2eb',
+    port: 27017,
+    version: '7.0.37',
+    gitVersion: '9d30419d900008ba3ecf2a14546b236f2158b65b'
+  },
+  serverParameters: {
+    internalQueryFacetBufferSizeBytes: 104857600,
+    internalQueryFacetMaxOutputDocSizeBytes: 104857600,
+    internalLookupStageIntermediateDocumentMaxSizeBytes: 104857600,
+    internalDocumentSourceGroupMaxMemoryBytes: 104857600,
+    internalQueryMaxBlockingSortMemoryUsageBytes: 104857600,
+    internalQueryProhibitBlockingMergeOnMongoS: 0,
+    internalQueryMaxAddToSetBytes: 104857600,
+    internalDocumentSourceSetWindowFieldsMaxMemoryBytes: 104857600,
+    internalQueryFrameworkControl: 'forceClassicEngine'
+  },
+  command: {
+    find: 'users',
+    filter: { email: 'user5000@gmail.com' },
+    lsid: { id: UUID('10819cce-af83-44b5-a27b-35bb9e67ea02') },
+    '$clusterTime': {
+      clusterTime: Timestamp({ t: 1782367876, i: 1 }),
+      signature: {
+        hash: Binary.createFromBase64('AAAAAAAAAAAAAAAAAAAAAAAAAAA=', 0),
+        keyId: 0
+      }
+    },
+    '$db': 'indexpoc'
+  },
+  ok: 1,
+  '$clusterTime': {
+    clusterTime: Timestamp({ t: 1782367927, i: 1 }),
+    signature: {
+      hash: Binary.createFromBase64('AAAAAAAAAAAAAAAAAAAAAAAAAAA=', 0),
+      keyId: Long('0')
+    }
+  },
+  operationTime: Timestamp({ t: 1782367927, i: 1 })
+}
+[direct: mongos] indexpoc> 
+*totalKeysExamined: 1,   // ← Checked 1 index entry*
+*totalDocsExamined: 1,   // ← Read 1 document*
+*executionTimeMillis: 0  // ← Instant*
+
+### Terminal output for range:
+[direct: mongos] config> use indexpoc
+switched to db indexpoc
+[direct: mongos] indexpoc> db.users.find({ 
+|     email: { $gte: "user5000@gmail.com", $lte: "user5099@gmail.com" } 
+| }).explain("executionStats")
+{
+  queryPlanner: {
+    mongosPlannerVersion: 1,
+    winningPlan: {
+      stage: 'SHARD_MERGE',
+      shards: [
+        {
+          shardName: 'shard2ReplSet',
+          connectionString: 'shard2ReplSet/shard2a:27018,shard2b:27018',
+          serverInfo: {
+            host: '0e09f8e109ad',
+            port: 27018,
+            version: '7.0.37',
+            gitVersion: '9d30419d900008ba3ecf2a14546b236f2158b65b'
+          },
+          namespace: 'indexpoc.users',
+          indexFilterSet: false,
+          parsedQuery: {
+            '$and': [
+              { email: { '$lte': 'user5099@gmail.com' } },
+              { email: { '$gte': 'user5000@gmail.com' } }
+            ]
+          },
+          queryHash: '5AC968EF',
+          planCacheKey: '801FC5C1',
+          optimizationTimeMillis: 0,
+          maxIndexedOrSolutionsReached: false,
+          maxIndexedAndSolutionsReached: false,
+          maxScansToExplodeReached: false,
+          winningPlan: {
+            stage: 'SHARDING_FILTER',
+            inputStage: {
+              stage: 'COLLSCAN',
+              filter: {
+                '$and': [
+                  { email: { '$lte': 'user5099@gmail.com' } },
+                  { email: { '$gte': 'user5000@gmail.com' } }
+                ]
+              },
+              direction: 'forward'
+            }
+          },
+          rejectedPlans: []
+        },
+        {
+          shardName: 'shard1ReplSet',
+          connectionString: 'shard1ReplSet/shard1a:27018,shard1b:27018',
+          serverInfo: {
+            host: '5bb057d7a917',
+            port: 27018,
+            version: '7.0.37',
+            gitVersion: '9d30419d900008ba3ecf2a14546b236f2158b65b'
+          },
+          namespace: 'indexpoc.users',
+          indexFilterSet: false,
+          parsedQuery: {
+            '$and': [
+              { email: { '$lte': 'user5099@gmail.com' } },
+              { email: { '$gte': 'user5000@gmail.com' } }
+            ]
+          },
+          queryHash: '5AC968EF',
+          planCacheKey: '801FC5C1',
+          optimizationTimeMillis: 0,
+          maxIndexedOrSolutionsReached: false,
+          maxIndexedAndSolutionsReached: false,
+          maxScansToExplodeReached: false,
+          winningPlan: {
+            stage: 'SHARDING_FILTER',
+            inputStage: {
+              stage: 'COLLSCAN',
+              filter: {
+                '$and': [
+                  { email: { '$lte': 'user5099@gmail.com' } },
+                  { email: { '$gte': 'user5000@gmail.com' } }
+                ]
+              },
+              direction: 'forward'
+            }
+          },
+          rejectedPlans: []
+        }
+      ]
+    }
+  },
+  executionStats: {
+    nReturned: 109,
+    executionTimeMillis: 33,
+    totalKeysExamined: 0,
+    totalDocsExamined: 10000,
+    executionStages: {
+      stage: 'SHARD_MERGE',
+      nReturned: 109,
+      executionTimeMillis: 33,
+      totalKeysExamined: 0,
+      totalDocsExamined: 10000,
+      totalChildMillis: Long('62'),
+      shards: [
+        {
+          shardName: 'shard2ReplSet',
+          executionSuccess: true,
+          nReturned: 54,
+          executionTimeMillis: 31,
+          totalKeysExamined: 0,
+          totalDocsExamined: 4947,
+          executionStages: {
+            stage: 'SHARDING_FILTER',
+            nReturned: 54,
+            executionTimeMillisEstimate: 0,
+            works: 4948,
+            advanced: 54,
+            needTime: 4893,
+            needYield: 0,
+            saveState: 4,
+            restoreState: 4,
+            isEOF: 1,
+            chunkSkips: 0,
+            inputStage: {
+              stage: 'COLLSCAN',
+              filter: {
+                '$and': [
+                  { email: { '$lte': 'user5099@gmail.com' } },
+                  { email: { '$gte': 'user5000@gmail.com' } }
+                ]
+              },
+              nReturned: 54,
+              executionTimeMillisEstimate: 0,
+              works: 4948,
+              advanced: 54,
+              needTime: 4893,
+              needYield: 0,
+              saveState: 4,
+              restoreState: 4,
+              isEOF: 1,
+              direction: 'forward',
+              docsExamined: 4947
+            }
+          }
+        },
+        {
+          shardName: 'shard1ReplSet',
+          executionSuccess: true,
+          nReturned: 55,
+          executionTimeMillis: 31,
+          totalKeysExamined: 0,
+          totalDocsExamined: 5053,
+          executionStages: {
+            stage: 'SHARDING_FILTER',
+            nReturned: 55,
+            executionTimeMillisEstimate: 0,
+            works: 5054,
+            advanced: 55,
+            needTime: 4998,
+            needYield: 0,
+            saveState: 5,
+            restoreState: 5,
+            isEOF: 1,
+            chunkSkips: 0,
+            inputStage: {
+              stage: 'COLLSCAN',
+              filter: {
+                '$and': [
+                  { email: { '$lte': 'user5099@gmail.com' } },
+                  { email: { '$gte': 'user5000@gmail.com' } }
+                ]
+              },
+              nReturned: 55,
+              executionTimeMillisEstimate: 0,
+              works: 5054,
+              advanced: 55,
+              needTime: 4998,
+              needYield: 0,
+              saveState: 5,
+              restoreState: 5,
+              isEOF: 1,
+              direction: 'forward',
+              docsExamined: 5053
+            }
+          }
+        }
+      ]
+    }
+  },
+  serverInfo: {
+    host: '46adeecca2eb',
+    port: 27017,
+    version: '7.0.37',
+    gitVersion: '9d30419d900008ba3ecf2a14546b236f2158b65b'
+  },
+  serverParameters: {
+    internalQueryFacetBufferSizeBytes: 104857600,
+    internalQueryFacetMaxOutputDocSizeBytes: 104857600,
+    internalLookupStageIntermediateDocumentMaxSizeBytes: 104857600,
+    internalDocumentSourceGroupMaxMemoryBytes: 104857600,
+    internalQueryMaxBlockingSortMemoryUsageBytes: 104857600,
+    internalQueryProhibitBlockingMergeOnMongoS: 0,
+    internalQueryMaxAddToSetBytes: 104857600,
+    internalDocumentSourceSetWindowFieldsMaxMemoryBytes: 104857600,
+    internalQueryFrameworkControl: 'forceClassicEngine'
+  },
+  command: {
+    find: 'users',
+    filter: {
+      email: { '$gte': 'user5000@gmail.com', '$lte': 'user5099@gmail.com' }
+    },
+    lsid: { id: UUID('10819cce-af83-44b5-a27b-35bb9e67ea02') },
+    '$clusterTime': {
+      clusterTime: Timestamp({ t: 1782368291, i: 2 }),
+      signature: {
+        hash: Binary.createFromBase64('AAAAAAAAAAAAAAAAAAAAAAAAAAA=', 0),
+        keyId: 0
+      }
+    },
+    '$db': 'indexpoc'
+  },
+  ok: 1,
+  '$clusterTime': {
+    clusterTime: Timestamp({ t: 1782368295, i: 1 }),
+    signature: {
+      hash: Binary.createFromBase64('AAAAAAAAAAAAAAAAAAAAAAAAAAA=', 0),
+      keyId: Long('0')
+    }
+  },
+  operationTime: Timestamp({ t: 1782368291, i: 1 })
+}
+[direct: mongos] indexpoc> 
+
+### Now Compare Both Outputs Side-by-Side:
+✅ Equality Query (Your First Output)
+stage: 'SINGLE_SHARD'           // ← Only 1 shard
+shardName: 'shard1ReplSet'      // ← Specific shard
+
+// On that shard:
+stage: 'IXSCAN'                 // ← Used hashed index
+indexName: 'email_hashed'
+indexBounds: { 
+  email: [ '[7677552327051713248, 7677552327051713248]' ]  // ← Exact point
+}
+totalKeysExamined: 1            // ← 1 index lookup
+totalDocsExamined: 1            // ← 1 document
+executionTimeMillis: 0          // ← Instant
+
+❌ Range Query (This Output)
+stage: 'SHARD_MERGE'            // ← Querying ALL shards + merging
+
+// Shard 1:
+stage: 'COLLSCAN'               // ← Full collection scan!
+totalKeysExamined: 0            // ← ZERO keys (no index)
+docsExamined: 5053              // ← Scanned all 5053 docs on this shard
+
+// Shard 2:
+stage: 'COLLSCAN'               // ← Full collection scan!
+totalKeysExamined: 0            // ← ZERO keys (no index)
+docsExamined: 4947              // ← Scanned all 4947 docs on this shard
+
+// Total:
+totalKeysExamined: 0            // ← Index IGNORED
+totalDocsExamined: 10000        // ← Scanned EVERY document
+executionTimeMillis: 33         // ← 33x slower than equality
+
+### Visual Comparison:
+*Equality Query Path:*
+mongos receives: { email: "user5000@gmail.com" }
+    ↓
+hash("user5000@gmail.com") → 7677552327051713248
+    ↓
+Lookup chunk table: Hash X belongs to → shard1ReplSet
+    ↓
+Route to SHARD 1 ONLY
+    ↓
+IXSCAN: Find 7677552327051713248 in B-Tree → 1 document
+    ↓
+Return: 1 result in 0ms
+
+*Range Query Path:*
+mongos receives: { email: { $gte: "user5000", $lte: "user5099" } }
+    ↓
+hash("user5000") → Random
+hash("user5099") → Random
+    ↓
+Can't determine which shards have these emails
+    ↓
+MUST QUERY ALL SHARDS (SHARD_MERGE)
+    ↓
+Shard 1: COLLSCAN 5053 docs → find 55 matches
+Shard 2: COLLSCAN 4947 docs → find 54 matches
+    ↓
+Merge results: 109 total
+    ↓
+Return: 109 results in 33ms
+
+### Imagine a Library Analogy
+You're the librarian (mongos). Someone asks:
+"Find the book with ISBN 978-1234567890"
+
+You have a catalog that tells you exactly which floor:
+ISBN 978-1234567890 → Floor 2, Shelf 5
+You go to ONLY Floor 2 → Found it! 🎯
+
+* This is SINGLE_SHARD (targeted query)
+
+"Find all books about 'cooking' published after 2020"
+
+Your catalog doesn't track topics or years. So you:
+📢 Announce on ALL floors: "Check your shelves for cooking books from 2021+"
+Floor 1 searches their 5000 books → finds 20
+Floor 2 searches their 5000 books → finds 15
+Floor 3 searches their 5000 books → finds 25
+You collect all results: 20 + 15 + 25 = 60 books
+
+* This is SCATTER-GATHER
+
+*without shard key means without hash index and it means it will search all the shard cluster*?
+Exactly right! 🎯
+
+Without shard key → mongos can't calculate hash → can't look up which shard owns the data → must ask every shard to search their entire collection → scatter-gather.
+
+// With shard key (email)
+db.users.find({ email: "user5000@gmail.com" })
+// mongos: hash() → Chunk lookup → "Shard 1!" → Only Shard 1
+
+// Without shard key (name)
+db.users.find({ name: "User5000" })
+// mongos: "No email to hash. No idea where this is." → All Shards
+
+* One sentence: No shard key = no hash = no chunk lookup = broadcast to all shards.
+
+### Real Numbers From Your Output:
+Query	                                  Stage	Shards              Used	Docs                 Searched
+{ email: "user5000@gmail.com" }	         SINGLE_SHARD	              1 shard	                   1 doc
+{ name: "User5000" }	                   SHARD_MERGE	              2 shards	              10,000 docs
+
+### The Biggest Lesson : Summary
+
+Look at these two outputs:
+1. Equality
+SINGLE_SHARD
+IXSCAN
+Docs Examined = 1
+2. Range
+SHARD_MERGE
+COLLSCAN
+Docs Examined = 10000
+
+That difference is exactly why people say:
+Hashed shard keys are excellent for equality lookups and distribution,
+but terrible for range queries.
+
+
+# Shard 1 Replica Set Status Terminal log:-
+------------------------------------------
+keerthana@Keerthanas-MacBook-Air indexes % docker ps
+CONTAINER ID   IMAGE     COMMAND                  CREATED       STATUS       PORTS                                             NAMES
+46adeecca2eb   mongo:7   "docker-entrypoint.s…"   3 hours ago   Up 3 hours   0.0.0.0:27017->27017/tcp, [::]:27017->27017/tcp   ecommerce-backend-mongos-1
+c9a8b7a17c68   mongo:7   "docker-entrypoint.s…"   3 hours ago   Up 3 hours   0.0.0.0:27019->27019/tcp, [::]:27019->27019/tcp   ecommerce-backend-configsvr1-1
+5bb057d7a917   mongo:7   "docker-entrypoint.s…"   3 hours ago   Up 3 hours   0.0.0.0:27018->27018/tcp, [::]:27018->27018/tcp   ecommerce-backend-shard1a-1
+1e7c1baff8c0   mongo:7   "docker-entrypoint.s…"   3 hours ago   Up 3 hours   27017/tcp                                         ecommerce-backend-shard2b-1
+c9166f94d7ab   mongo:7   "docker-entrypoint.s…"   3 hours ago   Up 3 hours   27017/tcp                                         ecommerce-backend-shard1b-1
+0e09f8e109ad   mongo:7   "docker-entrypoint.s…"   3 hours ago   Up 3 hours   0.0.0.0:27028->27018/tcp, [::]:27028->27018/tcp   ecommerce-backend-shard2a-1
+keerthana@Keerthanas-MacBook-Air indexes % docker exec -it 5bb057d7a917 mongosh --port 27018
+Current Mongosh Log ID: 6a3cecd38de24229d2d1a7ba
+Connecting to:          mongodb://127.0.0.1:27018/?directConnection=true&serverSelectionTimeoutMS=2000&appName=mongosh+2.8.3
+Using MongoDB:          7.0.37
+Using Mongosh:          2.8.3
+
+For mongosh info see: https://www.mongodb.com/docs/mongodb-shell/
+
+
+To help improve our products, anonymous usage data is collected and sent to MongoDB periodically (https://www.mongodb.com/legal/privacy-policy).
+You can opt-out by running the disableTelemetry() command.
+
+------
+   The server generated these startup warnings when booting
+   2026-06-25T05:56:30.968+00:00: Using the XFS filesystem is strongly recommended with the WiredTiger storage engine. See http://dochub.mongodb.org/core/prodnotes-filesystem
+   2026-06-25T05:56:31.764+00:00: Access control is not enabled for the database. Read and write access to data and configuration is unrestricted
+   2026-06-25T05:56:31.764+00:00: For customers running MongoDB 7.0, we suggest changing the contents of the following sysfsFile
+------
+
+shard1ReplSet [direct: primary] test> rs.status()
+{
+  set: 'shard1ReplSet',
+  date: ISODate('2026-06-25T08:55:03.589Z'),
+  myState: 1,
+  term: Long('4'),
+  syncSourceHost: '',
+  syncSourceId: -1,
+  heartbeatIntervalMillis: Long('2000'),
+  majorityVoteCount: 2,
+  writeMajorityCount: 2,
+  votingMembersCount: 2,
+  writableVotingMembersCount: 2,
+  optimes: {
+    lastCommittedOpTime: { ts: Timestamp({ t: 1782377701, i: 1 }), t: Long('4') },
+    lastCommittedWallTime: ISODate('2026-06-25T08:55:01.679Z'),
+    readConcernMajorityOpTime: { ts: Timestamp({ t: 1782377701, i: 1 }), t: Long('4') },
+    appliedOpTime: { ts: Timestamp({ t: 1782377701, i: 1 }), t: Long('4') },
+    durableOpTime: { ts: Timestamp({ t: 1782377701, i: 1 }), t: Long('4') },
+    lastAppliedWallTime: ISODate('2026-06-25T08:55:01.679Z'),
+    lastDurableWallTime: ISODate('2026-06-25T08:55:01.679Z')
+  },
+  lastStableRecoveryTimestamp: Timestamp({ t: 1782377691, i: 1 }),
+  electionCandidateMetrics: {
+    lastElectionReason: 'electionTimeout',
+    lastElectionDate: ISODate('2026-06-25T08:24:22.828Z'),
+    electionTerm: Long('4'),
+    lastCommittedOpTimeAtElection: { ts: Timestamp({ t: 1782374723, i: 1 }), t: Long('3') },
+    lastSeenOpTimeAtElection: { ts: Timestamp({ t: 1782374723, i: 1 }), t: Long('3') },
+    numVotesNeeded: 2,
+    priorityAtElection: 1,
+    electionTimeoutMillis: Long('10000'),
+    numCatchUpOps: Long('0'),
+    newTermStartDate: ISODate('2026-06-25T08:24:22.834Z'),
+    wMajorityWriteAvailabilityDate: ISODate('2026-06-25T08:24:22.843Z')
+  },
+  electionParticipantMetrics: {
+    votedForCandidate: true,
+    electionTerm: Long('3'),
+    lastVoteDate: ISODate('2026-06-25T08:05:13.845Z'),
+    electionCandidateMemberId: 1,
+    voteReason: '',
+    lastAppliedOpTimeAtElection: { ts: Timestamp({ t: 1782374703, i: 1 }), t: Long('2') },
+    maxAppliedOpTimeInSet: { ts: Timestamp({ t: 1782374703, i: 1 }), t: Long('2') },
+    priorityAtElection: 1
+  },
+  members: [
+    {
+      _id: 0,
+      name: 'shard1a:27018',
+      health: 1,
+      state: 1,
+      stateStr: 'PRIMARY',
+      uptime: 10713,
+      optime: { ts: Timestamp({ t: 1782377701, i: 1 }), t: Long('4') },
+      optimeDate: ISODate('2026-06-25T08:55:01.000Z'),
+      lastAppliedWallTime: ISODate('2026-06-25T08:55:01.679Z'),
+      lastDurableWallTime: ISODate('2026-06-25T08:55:01.679Z'),
+      syncSourceHost: '',
+      syncSourceId: -1,
+      infoMessage: '',
+      electionTime: Timestamp({ t: 1782375862, i: 3 }),
+      electionDate: ISODate('2026-06-25T08:24:22.000Z'),
+      configVersion: 1,
+      configTerm: 4,
+      self: true,
+      lastHeartbeatMessage: ''
+    },
+    {
+      _id: 1,
+      name: 'shard1b:27018',
+      health: 1,
+      state: 2,
+      stateStr: 'SECONDARY',
+      uptime: 10646,
+      optime: { ts: Timestamp({ t: 1782377701, i: 1 }), t: Long('4') },
+      optimeDurable: { ts: Timestamp({ t: 1782377701, i: 1 }), t: Long('4') },
+      optimeDate: ISODate('2026-06-25T08:55:01.000Z'),
+      optimeDurableDate: ISODate('2026-06-25T08:55:01.000Z'),
+      lastAppliedWallTime: ISODate('2026-06-25T08:55:01.679Z'),
+      lastDurableWallTime: ISODate('2026-06-25T08:55:01.679Z'),
+      lastHeartbeat: ISODate('2026-06-25T08:55:02.837Z'),
+      lastHeartbeatRecv: ISODate('2026-06-25T08:55:02.837Z'),
+      pingMs: Long('0'),
+      lastHeartbeatMessage: '',
+      syncSourceHost: 'shard1a:27018',
+      syncSourceId: 0,
+      infoMessage: '',
+      configVersion: 1,
+      configTerm: 4
+    }
+  ],
+  ok: 1,
+  '$clusterTime': {
+    clusterTime: Timestamp({ t: 1782377701, i: 1 }),
+    signature: {
+      hash: Binary.createFromBase64('AAAAAAAAAAAAAAAAAAAAAAAAAAA=', 0),
+      keyId: Long('0')
+    }
+  },
+  operationTime: Timestamp({ t: 1782377701, i: 1 })
+}
+shard1ReplSet [direct: primary] test> use indexpoc
+switched to db indexpoc
+shard1ReplSet [direct: primary] indexpoc> db.users.countDocuments()
+5053
+
+##### Terminal 1 (shard1b - SECONDARY of Shard 1)::
+keerthana@Keerthanas-MacBook-Air indexes % docker exec -it c9166f94d7ab mongosh --port 27018
+Current Mongosh Log ID: 6a3cee061e753c21efd1a7ba
+Connecting to:          mongodb://127.0.0.1:27018/?directConnection=true&serverSelectionTimeoutMS=2000&appName=mongosh+2.8.3
+Using MongoDB:          7.0.37
+Using Mongosh:          2.8.3
+
+For mongosh info see: https://www.mongodb.com/docs/mongodb-shell/
+
+------
+   The server generated these startup warnings when booting
+   2026-06-25T05:56:30.954+00:00: Using the XFS filesystem is strongly recommended with the WiredTiger storage engine. See http://dochub.mongodb.org/core/prodnotes-filesystem
+   2026-06-25T05:56:31.741+00:00: Access control is not enabled for the database. Read and write access to data and configuration is unrestricted
+   2026-06-25T05:56:31.741+00:00: For customers running MongoDB 7.0, we suggest changing the contents of the following sysfsFile
+------
+
+shard1ReplSet [direct: secondary] test> use indexpoc
+switched to db indexpoc
+shard1ReplSet [direct: secondary] indexpoc> db.users.countDocuments()
+5053
+shard1ReplSet [direct: secondary] indexpoc> db.users.findOne({ email: "user5000@gmail.com" })
+{
+  _id: ObjectId('6a3cc44af407a810591be31d'),
+  email: 'user5000@gmail.com',
+  name: 'User5000',
+  age: 17,
+  __v: 0
+}
+shard1ReplSet [direct: secondary] indexpoc> 
+
+
+#### MongoDB Doesn't Insert One-by-One in Sharded Cluster:
+----------------------------------------------------------
+*i understand, before inserting user in mongodb sharder cluster it will chunk the data beacuse it will not insert one by one doc?*
+❌ NOT THIS:
+mongos: "Insert user0" → hash → Shard 1
+mongos: "Insert user1" → hash → Shard 2
+mongos: "Insert user2" → hash → Shard 1
+(one at a time - too slow)
+
+✅ THIS:
+mongos: "I have 10000 users to insert"
+mongos: Hashes all emails → Groups by chunk range
+        ┌─────────────────┐  ┌─────────────────┐
+        │ Chunk A (0 to X) │  │ Chunk B (X to ∞) │
+        │ 5053 users       │  │ 4947 users       │
+        └─────────────────┘  └─────────────────┘
+              ↓                      ↓
+          Shard 1               Shard 2
+        (one batch!)          (one batch!)
+
+*What Chunks Do:*
+1. Chunks = Data Buckets
+text
+Instead of:
+  "Move user5000 to Shard 2"
+  "Move user5001 to Shard 2"
+  ... (impossible to do one-by-one)
+
+MongoDB does:
+  "Move Chunk 2 (2500 users) to Shard 2"  ← One operation!
+2. Chunks Auto-Split
+text
+When 2500 users → chunk gets too big (64MB default)
+
+Before:
+┌──────────────────────┐
+│      Chunk 1         │  (5000 users, 400MB)
+└──────────────────────┘
+
+After auto-split:
+┌──────────┐ ┌──────────┐
+│ Chunk 1A │ │ Chunk 1B │  (2500 users each, 200MB)
+└──────────┘ └──────────┘
+3. Balancer Uses Chunks
+text
+Shard 1: 10 chunks (hot)     Shard 2: 2 chunks (cold)
+     ↓                              ↓
+Balancer detects imbalance → moves chunks
+
+Shard 1: 6 chunks              Shard 2: 6 chunks  ✅ Balanced!
+
+## One-Liner:
+MongoDB hashes the shard key first, groups documents by chunk range, then sends each group as a single batch to the correct shard — not one-by-one.
+
+*That's Why Chunks Matter:*
+Without chunks:
+  Insert 10,000 docs → 10,000 network calls → SLOW
+
+With chunks:
+  Insert 10,000 docs → hash → group → 2 network calls → FAST
+
+
+# 1 million insert record to check chunk terminal logs:
+keerthana@Keerthanas-MacBook-Air indexes % mongosh --port 27017
+Current Mongosh Log ID:	6a3cfd623dcf3d5951f20282
+Connecting to:		mongodb://127.0.0.1:27017/?directConnection=true&serverSelectionTimeoutMS=2000&appName=mongosh+2.8.3
+Using MongoDB:		7.0.37
+Using Mongosh:		2.8.3
+
+For mongosh info see: https://www.mongodb.com/docs/mongodb-shell/
+
+------
+   The server generated these startup warnings when booting
+   2026-06-25T05:56:31.149+00:00: Access control is not enabled for the database. Read and write access to data and configuration is unrestricted
+------
+
+[direct: mongos] test> use indexpoc
+switched to db indexpoc
+[direct: mongos] indexpoc> db.users.getShardDistribution()
+Shard shard2ReplSet at shard2ReplSet/shard2a:27018,shard2b:27018
+{
+  data: '44.23MiB',
+  docs: 499947,
+  chunks: 1,
+  'estimated data per chunk': '44.23MiB',
+  'estimated docs per chunk': 499947
+}
+---
+Shard shard1ReplSet at shard1ReplSet/shard1a:27018,shard1b:27018
+{
+  data: '44.24MiB',
+  docs: 500053,
+  chunks: 1,
+  'estimated data per chunk': '44.24MiB',
+  'estimated docs per chunk': 500053
+}
+---
+Totals
+{
+  data: '88.47MiB',
+  docs: 1000000,
+  chunks: 2,
+  'Shard shard2ReplSet': [
+    '49.99 % data',
+    '49.99 % docs in cluster',
+    '92B avg obj size on shard'
+  ],
+  'Shard shard1ReplSet': [ '50 % data', '50 % docs in cluster', '92B avg obj size on shard' ]
+}
+[direct: mongos] indexpoc> use config
+switched to db config
+[direct: mongos] config> db.chunks.countDocuments({
+|    uuid: db.getSiblingDB("config")
+|             .collections
+|             .findOne({_id:"indexpoc.users"})
+|             .uuid
+| })
+2
+[direct: mongos] config> sh.status()
+shardingVersion
+{ _id: 1, clusterId: ObjectId('6a3cc34ddd9fa1ef53a3cf85') }
+---
+shards
+[
+  {
+    _id: 'shard1ReplSet',
+    host: 'shard1ReplSet/shard1a:27018,shard1b:27018',
+    state: 1,
+    topologyTime: Timestamp({ t: 1782367068, i: 8 })
+  },
+  {
+    _id: 'shard2ReplSet',
+    host: 'shard2ReplSet/shard2a:27018,shard2b:27018',
+    state: 1,
+    topologyTime: Timestamp({ t: 1782367071, i: 8 })
+  }
+]
+---
+active mongoses
+[ { '7.0.37': 1 } ]
+---
+autosplit
+{ 'Currently enabled': 'yes' }
+---
+automerge
+{ 'Currently enabled': 'yes' }
+---
+balancer
+{
+  'Currently enabled': 'yes',
+  'Failed balancer rounds in last 5 attempts': 0,
+  'Currently running': 'no',
+  'Migration Results for the last 24 hours': 'No recent migrations'
+}
+---
+shardedDataDistribution
+[
+  {
+    ns: 'indexpoc.users',
+    shards: [
+      {
+        shardName: 'shard1ReplSet',
+        numOrphanedDocs: 0,
+        numOwnedDocuments: 500053,
+        ownedSizeBytes: 46004876,
+        orphanedSizeBytes: 0
+      },
+      {
+        shardName: 'shard2ReplSet',
+        numOrphanedDocs: 0,
+        numOwnedDocuments: 499947,
+        ownedSizeBytes: 45995124,
+        orphanedSizeBytes: 0
+      }
+    ]
+  },
+  {
+    ns: 'config.system.sessions',
+    shards: [
+      {
+        shardName: 'shard1ReplSet',
+        numOrphanedDocs: 0,
+        numOwnedDocuments: 13,
+        ownedSizeBytes: 1287,
+        orphanedSizeBytes: 0
+      }
+    ]
+  }
+]
+---
+databases
+[
+  {
+    database: { _id: 'config', primary: 'config', partitioned: true },
+    collections: {
+      'config.system.sessions': {
+        shardKey: { _id: 1 },
+        unique: false,
+        balancing: true,
+        allowMigrations: true,
+        chunkMetadata: [ { shard: 'shard1ReplSet', nChunks: 1 } ],
+        chunks: [
+          { min: { _id: MinKey() }, max: { _id: MaxKey() }, 'on shard': 'shard1ReplSet', 'last modified': Timestamp({ t: 1, i: 0 }) }
+        ],
+        tags: []
+      }
+    }
+  },
+  {
+    database: {
+      _id: 'indexpoc',
+      primary: 'shard2ReplSet',
+      partitioned: false,
+      version: {
+        uuid: UUID('d1ccafc8-135c-4e93-84c8-f9fb18264f6b'),
+        timestamp: Timestamp({ t: 1782367143, i: 1 }),
+        lastMod: 1
+      }
+    },
+    collections: {
+      'indexpoc.users': {
+        shardKey: { email: 'hashed' },
+        unique: false,
+        balancing: true,
+        allowMigrations: true,
+        chunkMetadata: [
+          { shard: 'shard1ReplSet', nChunks: 1 },
+          { shard: 'shard2ReplSet', nChunks: 1 }
+        ],
+        chunks: [
+          { min: { email: MinKey() }, max: { email: Long('0') }, 'on shard': 'shard2ReplSet', 'last modified': Timestamp({ t: 1, i: 5 }) },
+          { min: { email: Long('0') }, max: { email: MaxKey() }, 'on shard': 'shard1ReplSet', 'last modified': Timestamp({ t: 1, i: 4 }) }
+        ],
+        tags: []
+      }
+    }
+  }
+]
+[direct: mongos] config> use indexpoc
+switched to db indexpoc
+[direct: mongos] indexpoc> db.users.stats()
+{
+  ok: 1,
+  capped: false,
+  wiredTiger: {
+    metadata: { formatVersion: 1 },
+    creationString: 'access_pattern_hint=none,allocation_size=4KB,app_metadata=(formatVersion=1),assert=(commit_timestamp=none,durable_timestamp=none,read_timestamp=none,write_timestamp=on),block_allocation=best,block_compressor=snappy,cache_resident=false,checksum=on,colgroups=,collator=,columns=,dictionary=0,encryption=(keyid=,name=),exclusive=false,extractor=,format=btree,huffman_key=,huffman_value=,ignore_in_memory_cache_size=false,immutable=false,import=(compare_timestamp=oldest_timestamp,enabled=false,file_metadata=,metadata_file=,repair=false),internal_item_max=0,internal_key_max=0,internal_key_truncate=true,internal_page_max=4KB,key_format=q,key_gap=10,leaf_item_max=0,leaf_key_max=0,leaf_page_max=32KB,leaf_value_max=64MB,log=(enabled=false),lsm=(auto_throttle=true,bloom=true,bloom_bit_count=16,bloom_config=,bloom_hash_count=8,bloom_oldest=false,chunk_count_limit=0,chunk_max=5GB,chunk_size=10MB,merge_custom=(prefix=,start_generation=0,suffix=),merge_max=15,merge_min=0),memory_page_image_max=0,memory_page_max=10m,os_cache_dirty_max=0,os_cache_max=0,prefix_compression=false,prefix_compression_min=4,source=,split_deepen_min_child=0,split_deepen_per_child=0,split_pct=90,tiered_storage=(auth_token=,bucket=,bucket_prefix=,cache_directory=,local_retention=300,name=,object_target_size=0),type=file,value_format=u,verbose=[write_timestamp],write_timestamp_usage=none',
+    type: 'file',
+    uri: 'statistics:table:collection-54-6084271676884376252',
+    LSM: {
+      'bloom filter false positives': 0,
+      'bloom filter hits': 0,
+      'bloom filter misses': 0,
+      'bloom filter pages evicted from cache': 0,
+      'bloom filter pages read into cache': 0,
+      'bloom filters in the LSM tree': 0,
+      'chunks in the LSM tree': 0,
+      'highest merge generation in the LSM tree': 0,
+      'queries that could have benefited from a Bloom filter that did not exist': 0,
+      'sleep for LSM checkpoint throttle': 0,
+      'sleep for LSM merge throttle': 0,
+      'total size of bloom filters': 0
+    },
+    autocommit: {
+      'retries for readonly operations': 0,
+      'retries for update operations': 0
+    },
+    'block-manager': {
+      'allocations requiring file extension': 559,
+      'blocks allocated': 1067,
+      'blocks freed': 515,
+      'checkpoint size': 15818752,
+      'file allocation unit size': 4096,
+      'file bytes available for reuse': 1359872,
+      'file magic number': 120897,
+      'file major version number': 1,
+      'file size in bytes': 17195008,
+      'minor version number': 0
+    },
+    btree: {
+      'btree checkpoint generation': 124,
+      'btree clean tree checkpoint expiration time': Long('9223372036854775807'),
+      'btree compact pages reviewed': 0,
+      'btree compact pages rewritten': 0,
+      'btree compact pages skipped': 0,
+      'btree number of pages reconciled during checkpoint': 56,
+      'btree skipped by compaction as process would not reduce size': 0,
+      'column-store fixed-size leaf pages': 0,
+      'column-store fixed-size time windows': 0,
+      'column-store internal pages': 0,
+      'column-store variable-size RLE encoded values': 0,
+      'column-store variable-size deleted values': 0,
+      'column-store variable-size leaf pages': 0,
+      'fixed-record size': 0,
+      'maximum internal page size': 4096,
+      'maximum leaf page key size': 2867,
+      'maximum leaf page size': 32768,
+      'maximum leaf page value size': 67108864,
+      'maximum tree depth': 3,
+      'number of key/value pairs': 0,
+      'overflow pages': 0,
+      'row-store empty values': 0,
+      'row-store internal pages': 0,
+      'row-store leaf pages': 0
+    },
+    cache: {
+      'bytes currently in the cache': 76488297,
+      'bytes dirty in the cache cumulative': 17909900,
+      'bytes read into cache': 25582414,
+      'bytes written from cache': 112753855,
+      'checkpoint blocked page eviction': 0,
+      'checkpoint of history store file blocked non-history store page eviction': 0,
+      'data source pages selected for eviction unable to be evicted': 0,
+      'eviction gave up due to detecting a disk value without a timestamp behind the last update on the chain': 0,
+      'eviction gave up due to detecting a tombstone without a timestamp ahead of the selected on disk update': 0,
+      'eviction gave up due to detecting a tombstone without a timestamp ahead of the selected on disk update after validating the update chain': 0,
+      'eviction gave up due to detecting update chain entries without timestamps after the selected on disk update': 0,
+      'eviction gave up due to needing to remove a record from the history store but checkpoint is running': 0,
+      'eviction gave up due to no progress being made': 0,
+      'eviction walk pages queued that had updates': 0,
+      'eviction walk pages queued that were clean': 0,
+      'eviction walk pages queued that were dirty': 0,
+      'eviction walk pages seen that had updates': 114,
+      'eviction walk pages seen that were clean': 905,
+      'eviction walk pages seen that were dirty': 23,
+      'eviction walk passes of a file': 12,
+      'eviction walk target pages histogram - 0-9': 0,
+      'eviction walk target pages histogram - 10-31': 1,
+      'eviction walk target pages histogram - 128 and higher': 0,
+      'eviction walk target pages histogram - 32-63': 11,
+      'eviction walk target pages histogram - 64-128': 0,
+      'eviction walk target pages reduced due to history store cache pressure': 0,
+      'eviction walks abandoned': 0,
+      'eviction walks gave up because they restarted their walk twice': 12,
+      'eviction walks gave up because they saw too many pages and found no candidates': 0,
+      'eviction walks gave up because they saw too many pages and found too few candidates': 0,
+      'eviction walks random search fails to locate a page, results in a null position': 0,
+      'eviction walks reached end of tree': 24,
+      'eviction walks restarted': 0,
+      'eviction walks started from root of tree': 12,
+      'eviction walks started from saved location in tree': 0,
+      'hazard pointer blocked page eviction': 0,
+      'history store table insert calls': 0,
+      'history store table insert calls that returned restart': 0,
+      'history store table reads': 0,
+      'history store table reads missed': 0,
+      'history store table reads requiring squashed modifies': 0,
+      'history store table resolved updates without timestamps that lose their durable timestamp': 0,
+      'history store table truncation by rollback to stable to remove an unstable update': 0,
+      'history store table truncation by rollback to stable to remove an update': 0,
+      'history store table truncation to remove all the keys of a btree': 0,
+      'history store table truncation to remove an update': 0,
+      'history store table truncation to remove range of updates due to an update without a timestamp on data page': 0,
+      'history store table truncation to remove range of updates due to key being removed from the data page during reconciliation': 0,
+      'history store table truncations that would have happened in non-dryrun mode': 0,
+      'history store table truncations to remove an unstable update that would have happened in non-dryrun mode': 0,
+      'history store table truncations to remove an update that would have happened in non-dryrun mode': 0,
+      'history store table updates without timestamps fixed up by reinserting with the fixed timestamp': 0,
+      'history store table writes requiring squashed modifies': 0,
+      'in-memory page passed criteria to be split': 33,
+      'in-memory page splits': 11,
+      'internal page split blocked its eviction': 0,
+      'internal pages evicted': 0,
+      'internal pages split during eviction': 0,
+      'leaf pages split during eviction': 18,
+      'locate a random in-mem ref by examining all entries on the root page': 0,
+      'modified pages evicted': 33,
+      'multi-block reconciliation blocked whilst checkpoint is running': 0,
+      'obsolete updates removed': 0,
+      'overflow keys on a multiblock row-store page blocked its eviction': 0,
+      'overflow pages read into cache': 0,
+      'page split during eviction deepened the tree': 0,
+      'page written requiring history store records': 0,
+      'pages read into cache': 216,
+      'pages read into cache after truncate': 0,
+      'pages read into cache after truncate in prepare state': 0,
+      'pages requested from the cache': 597343,
+      'pages seen by eviction walk': 1060,
+      'pages written from cache': 1029,
+      'pages written requiring in-memory restoration': 7,
+      'recent modification of a page blocked its eviction': 0,
+      'reverse splits performed': 0,
+      'reverse splits skipped because of VLCS namespace gap restrictions': 0,
+      'the number of times full update inserted to history store': 0,
+      'the number of times reverse modify inserted to history store': 0,
+      'tracked dirty bytes in the cache': 0,
+      'tracked dirty internal page bytes in the cache': 0,
+      'tracked dirty leaf page bytes in the cache': 0,
+      'uncommitted truncate blocked page eviction': 0,
+      'unmodified pages evicted': 8
+    },
+    cache_walk: {
+      'Average difference between current eviction generation when the page was last considered': 0,
+      'Average on-disk page image size seen': 0,
+      'Average time in cache for pages that have been visited by the eviction server': 0,
+      'Average time in cache for pages that have not been visited by the eviction server': 0,
+      'Clean pages currently in cache': 0,
+      'Current eviction generation': 0,
+      'Dirty pages currently in cache': 0,
+      'Entries in the root page': 0,
+      'Internal pages currently in cache': 0,
+      'Leaf pages currently in cache': 0,
+      'Maximum difference between current eviction generation when the page was last considered': 0,
+      'Maximum page size seen': 0,
+      'Minimum on-disk page image size seen': 0,
+      'Number of pages never visited by eviction server': 0,
+      'On-disk page image sizes smaller than a single allocation unit': 0,
+      'Pages created in memory and never written': 0,
+      'Pages currently queued for eviction': 0,
+      'Pages that could not be queued for eviction': 0,
+      'Refs skipped during cache traversal': 0,
+      'Size of the root page': 0,
+      'Total number of pages currently in cache': 0
+    },
+    'checkpoint-cleanup': {
+      'most recent duration on all eligible files (usecs)': 0,
+      'most recent handles processed': 0,
+      'pages added for eviction': 23,
+      'pages removed': 24,
+      'pages skipped during tree walk': 24,
+      'pages visited': 2192
+    },
+    compression: {
+      'compressed page maximum internal page size prior to compression': 4096,
+      'compressed page maximum leaf page size prior to compression ': 131072,
+      'compressed pages read': 216,
+      'compressed pages written': 980,
+      'number of blocks with compress ratio greater than 64': 0,
+      'number of blocks with compress ratio smaller than 16': 0,
+      'number of blocks with compress ratio smaller than 2': 0,
+      'number of blocks with compress ratio smaller than 32': 0,
+      'number of blocks with compress ratio smaller than 4': 191,
+      'number of blocks with compress ratio smaller than 64': 0,
+      'number of blocks with compress ratio smaller than 8': 25,
+      'page written failed to compress': 0,
+      'page written was too small to compress': 49
+    },
+    cursor: {
+      'Total number of deleted pages skipped during tree walk': 368,
+      'Total number of entries skipped by cursor next calls': 610989,
+      'Total number of entries skipped by cursor prev calls': 0,
+      'Total number of entries skipped to position the history store cursor': 0,
+      'Total number of in-memory deleted pages skipped during tree walk': 515,
+      'Total number of on-disk deleted pages skipped during tree walk': 0,
+      'Total number of times a search near has exited due to prefix config': 0,
+      'Total number of times cursor fails to temporarily release pinned page to encourage eviction of hot or large page': 0,
+      'Total number of times cursor temporarily releases pinned page to encourage eviction of hot or large page': 0,
+      'bulk loaded cursor insert calls': 0,
+      'cache cursors reuse count': 275688,
+      'close calls that result in cache': 275694,
+      'create calls': 44,
+      'cursor bound calls that return an error': 0,
+      'cursor bounds cleared from reset': 0,
+      'cursor bounds comparisons performed': 0,
+      'cursor bounds next called on an unpositioned cursor': 0,
+      'cursor bounds next early exit': 0,
+      'cursor bounds prev called on an unpositioned cursor': 0,
+      'cursor bounds prev early exit': 0,
+      'cursor bounds search early exit': 0,
+      'cursor bounds search near call repositioned cursor': 0,
+      'cursor cache calls that return an error': 0,
+      'cursor close calls that return an error': 0,
+      'cursor compare calls that return an error': 0,
+      'cursor equals calls that return an error': 0,
+      'cursor get key calls that return an error': 0,
+      'cursor get value calls that return an error': 0,
+      'cursor insert calls that return an error': 0,
+      'cursor insert check calls that return an error': 0,
+      'cursor largest key calls that return an error': 0,
+      'cursor modify calls that return an error': 0,
+      'cursor next calls that return an error': 0,
+      'cursor next calls that skip due to a globally visible history store tombstone': 0,
+      'cursor next calls that skip greater than 1 and fewer than 100 entries': 0,
+      'cursor next calls that skip greater than or equal to 100 entries': 144,
+      'cursor next random calls that return an error': 0,
+      'cursor prev calls that return an error': 0,
+      'cursor prev calls that skip due to a globally visible history store tombstone': 0,
+      'cursor prev calls that skip greater than or equal to 100 entries': 0,
+      'cursor prev calls that skip less than 100 entries': 0,
+      'cursor reconfigure calls that return an error': 0,
+      'cursor remove calls that return an error': 0,
+      'cursor reopen calls that return an error': 0,
+      'cursor reserve calls that return an error': 0,
+      'cursor reset calls that return an error': 0,
+      'cursor search calls that return an error': 0,
+      'cursor search near calls that return an error': 0,
+      'cursor update calls that return an error': 0,
+      'insert calls': 534576,
+      'insert key and value bytes': 51514297,
+      modify: 0,
+      'modify key and value bytes affected': 0,
+      'modify value bytes modified': 0,
+      'next calls': 7545667,
+      'open cursor count': 0,
+      'operation restarted': 182,
+      'prev calls': 1,
+      'remove calls': 34629,
+      'remove key bytes removed': 95313,
+      'reserve calls': 0,
+      'reset calls': 615141,
+      'search calls': 71854,
+      'search history store calls': 0,
+      'search near calls': 9975,
+      'truncate calls': 0,
+      'update calls': 0,
+      'update key and value bytes': 0,
+      'update value size change': 0
+    },
+    reconciliation: {
+      'VLCS pages explicitly reconciled as empty': 0,
+      'approximate byte size of timestamps in pages written': 16254864,
+      'approximate byte size of transaction IDs in pages written': 8127432,
+      'cursor next/prev calls during HS wrapup search_near': 0,
+      'dictionary matches': 0,
+      'fast-path pages deleted': 0,
+      'internal page key bytes discarded using suffix compression': 1903,
+      'internal page multi-block writes': 9,
+      'leaf page key bytes discarded using prefix compression': 0,
+      'leaf page multi-block writes': 39,
+      'leaf-page overflow keys': 0,
+      'maximum blocks required for a page': 1,
+      'overflow values written': 0,
+      'page reconciliation calls': 72,
+      'page reconciliation calls for eviction': 7,
+      'pages deleted': 0,
+      'pages written including an aggregated newest start durable timestamp ': 41,
+      'pages written including an aggregated newest stop durable timestamp ': 27,
+      'pages written including an aggregated newest stop timestamp ': 16,
+      'pages written including an aggregated newest stop transaction ID': 16,
+      'pages written including an aggregated newest transaction ID ': 41,
+      'pages written including an aggregated oldest start timestamp ': 41,
+      'pages written including an aggregated prepare': 0,
+      'pages written including at least one prepare': 0,
+      'pages written including at least one start durable timestamp': 935,
+      'pages written including at least one start timestamp': 935,
+      'pages written including at least one start transaction ID': 935,
+      'pages written including at least one stop durable timestamp': 69,
+      'pages written including at least one stop timestamp': 69,
+      'pages written including at least one stop transaction ID': 69,
+      'records written including a prepare': 0,
+      'records written including a start durable timestamp': 954610,
+      'records written including a start timestamp': 954610,
+      'records written including a start transaction ID': 954610,
+      'records written including a stop durable timestamp': 61319,
+      'records written including a stop timestamp': 61319,
+      'records written including a stop transaction ID': 61319
+    },
+    session: { 'object compaction': 0 },
+    transaction: {
+      'a reader raced with a prepared transaction commit and skipped an update or updates': 0,
+      'checkpoint has acquired a snapshot for its transaction': 0,
+      'number of times overflow removed value is read': 0,
+      'race to read prepared update retry': 0,
+      'rollback to stable history store keys that would have been swept in non-dryrun mode': 0,
+      'rollback to stable history store records with stop timestamps older than newer records': 0,
+      'rollback to stable inconsistent checkpoint': 0,
+      'rollback to stable keys removed': 0,
+      'rollback to stable keys restored': 0,
+      'rollback to stable keys that would have been removed in non-dryrun mode': 0,
+      'rollback to stable keys that would have been restored in non-dryrun mode': 0,
+      'rollback to stable restored tombstones from history store': 0,
+      'rollback to stable restored updates from history store': 0,
+      'rollback to stable skipping delete rle': 0,
+      'rollback to stable skipping stable rle': 0,
+      'rollback to stable sweeping history store keys': 0,
+      'rollback to stable tombstones from history store that would have been restored in non-dryrun mode': 0,
+      'rollback to stable updates from history store that would have been restored in non-dryrun mode': 0,
+      'rollback to stable updates removed from history store': 0,
+      'rollback to stable updates that would have been removed from history store in non-dryrun mode': 0,
+      'transaction checkpoints due to obsolete pages': 0,
+      'update conflicts': 0
+    }
+  },
+  shards: {
+    shard2ReplSet: {
+      size: 46384021,
+      count: 499947,
+      avgObjSize: 92,
+      numOrphanDocs: 0,
+      storageSize: 17195008,
+      freeStorageSize: 1359872,
+      capped: false,
+      wiredTiger: {
+        metadata: { formatVersion: 1 },
+        creationString: 'access_pattern_hint=none,allocation_size=4KB,app_metadata=(formatVersion=1),assert=(commit_timestamp=none,durable_timestamp=none,read_timestamp=none,write_timestamp=on),block_allocation=best,block_compressor=snappy,cache_resident=false,checksum=on,colgroups=,collator=,columns=,dictionary=0,encryption=(keyid=,name=),exclusive=false,extractor=,format=btree,huffman_key=,huffman_value=,ignore_in_memory_cache_size=false,immutable=false,import=(compare_timestamp=oldest_timestamp,enabled=false,file_metadata=,metadata_file=,repair=false),internal_item_max=0,internal_key_max=0,internal_key_truncate=true,internal_page_max=4KB,key_format=q,key_gap=10,leaf_item_max=0,leaf_key_max=0,leaf_page_max=32KB,leaf_value_max=64MB,log=(enabled=false),lsm=(auto_throttle=true,bloom=true,bloom_bit_count=16,bloom_config=,bloom_hash_count=8,bloom_oldest=false,chunk_count_limit=0,chunk_max=5GB,chunk_size=10MB,merge_custom=(prefix=,start_generation=0,suffix=),merge_max=15,merge_min=0),memory_page_image_max=0,memory_page_max=10m,os_cache_dirty_max=0,os_cache_max=0,prefix_compression=false,prefix_compression_min=4,source=,split_deepen_min_child=0,split_deepen_per_child=0,split_pct=90,tiered_storage=(auth_token=,bucket=,bucket_prefix=,cache_directory=,local_retention=300,name=,object_target_size=0),type=file,value_format=u,verbose=[write_timestamp],write_timestamp_usage=none',
+        type: 'file',
+        uri: 'statistics:table:collection-54-6084271676884376252',
+        LSM: {
+          'bloom filter false positives': 0,
+          'bloom filter hits': 0,
+          'bloom filter misses': 0,
+          'bloom filter pages evicted from cache': 0,
+          'bloom filter pages read into cache': 0,
+          'bloom filters in the LSM tree': 0,
+          'chunks in the LSM tree': 0,
+          'highest merge generation in the LSM tree': 0,
+          'queries that could have benefited from a Bloom filter that did not exist': 0,
+          'sleep for LSM checkpoint throttle': 0,
+          'sleep for LSM merge throttle': 0,
+          'total size of bloom filters': 0
+        },
+        autocommit: {
+          'retries for readonly operations': 0,
+          'retries for update operations': 0
+        },
+        'block-manager': {
+          'allocations requiring file extension': 559,
+          'blocks allocated': 1067,
+          'blocks freed': 515,
+          'checkpoint size': 15818752,
+          'file allocation unit size': 4096,
+          'file bytes available for reuse': 1359872,
+          'file magic number': 120897,
+          'file major version number': 1,
+          'file size in bytes': 17195008,
+          'minor version number': 0
+        },
+        btree: {
+          'btree checkpoint generation': 124,
+          'btree clean tree checkpoint expiration time': Long('9223372036854775807'),
+          'btree compact pages reviewed': 0,
+          'btree compact pages rewritten': 0,
+          'btree compact pages skipped': 0,
+          'btree number of pages reconciled during checkpoint': 56,
+          'btree skipped by compaction as process would not reduce size': 0,
+          'column-store fixed-size leaf pages': 0,
+          'column-store fixed-size time windows': 0,
+          'column-store internal pages': 0,
+          'column-store variable-size RLE encoded values': 0,
+          'column-store variable-size deleted values': 0,
+          'column-store variable-size leaf pages': 0,
+          'fixed-record size': 0,
+          'maximum internal page size': 4096,
+          'maximum leaf page key size': 2867,
+          'maximum leaf page size': 32768,
+          'maximum leaf page value size': 67108864,
+          'maximum tree depth': 3,
+          'number of key/value pairs': 0,
+          'overflow pages': 0,
+          'row-store empty values': 0,
+          'row-store internal pages': 0,
+          'row-store leaf pages': 0
+        },
+        cache: {
+          'bytes currently in the cache': 76488297,
+          'bytes dirty in the cache cumulative': 17909900,
+          'bytes read into cache': 25582414,
+          'bytes written from cache': 112753855,
+          'checkpoint blocked page eviction': 0,
+          'checkpoint of history store file blocked non-history store page eviction': 0,
+          'data source pages selected for eviction unable to be evicted': 0,
+          'eviction gave up due to detecting a disk value without a timestamp behind the last update on the chain': 0,
+          'eviction gave up due to detecting a tombstone without a timestamp ahead of the selected on disk update': 0,
+          'eviction gave up due to detecting a tombstone without a timestamp ahead of the selected on disk update after validating the update chain': 0,
+          'eviction gave up due to detecting update chain entries without timestamps after the selected on disk update': 0,
+          'eviction gave up due to needing to remove a record from the history store but checkpoint is running': 0,
+          'eviction gave up due to no progress being made': 0,
+          'eviction walk pages queued that had updates': 0,
+          'eviction walk pages queued that were clean': 0,
+          'eviction walk pages queued that were dirty': 0,
+          'eviction walk pages seen that had updates': 114,
+          'eviction walk pages seen that were clean': 905,
+          'eviction walk pages seen that were dirty': 23,
+          'eviction walk passes of a file': 12,
+          'eviction walk target pages histogram - 0-9': 0,
+          'eviction walk target pages histogram - 10-31': 1,
+          'eviction walk target pages histogram - 128 and higher': 0,
+          'eviction walk target pages histogram - 32-63': 11,
+          'eviction walk target pages histogram - 64-128': 0,
+          'eviction walk target pages reduced due to history store cache pressure': 0,
+          'eviction walks abandoned': 0,
+          'eviction walks gave up because they restarted their walk twice': 12,
+          'eviction walks gave up because they saw too many pages and found no candidates': 0,
+          'eviction walks gave up because they saw too many pages and found too few candidates': 0,
+          'eviction walks random search fails to locate a page, results in a null position': 0,
+          'eviction walks reached end of tree': 24,
+          'eviction walks restarted': 0,
+          'eviction walks started from root of tree': 12,
+          'eviction walks started from saved location in tree': 0,
+          'hazard pointer blocked page eviction': 0,
+          'history store table insert calls': 0,
+          'history store table insert calls that returned restart': 0,
+          'history store table reads': 0,
+          'history store table reads missed': 0,
+          'history store table reads requiring squashed modifies': 0,
+          'history store table resolved updates without timestamps that lose their durable timestamp': 0,
+          'history store table truncation by rollback to stable to remove an unstable update': 0,
+          'history store table truncation by rollback to stable to remove an update': 0,
+          'history store table truncation to remove all the keys of a btree': 0,
+          'history store table truncation to remove an update': 0,
+          'history store table truncation to remove range of updates due to an update without a timestamp on data page': 0,
+          'history store table truncation to remove range of updates due to key being removed from the data page during reconciliation': 0,
+          'history store table truncations that would have happened in non-dryrun mode': 0,
+          'history store table truncations to remove an unstable update that would have happened in non-dryrun mode': 0,
+          'history store table truncations to remove an update that would have happened in non-dryrun mode': 0,
+          'history store table updates without timestamps fixed up by reinserting with the fixed timestamp': 0,
+          'history store table writes requiring squashed modifies': 0,
+          'in-memory page passed criteria to be split': 33,
+          'in-memory page splits': 11,
+          'internal page split blocked its eviction': 0,
+          'internal pages evicted': 0,
+          'internal pages split during eviction': 0,
+          'leaf pages split during eviction': 18,
+          'locate a random in-mem ref by examining all entries on the root page': 0,
+          'modified pages evicted': 33,
+          'multi-block reconciliation blocked whilst checkpoint is running': 0,
+          'obsolete updates removed': 0,
+          'overflow keys on a multiblock row-store page blocked its eviction': 0,
+          'overflow pages read into cache': 0,
+          'page split during eviction deepened the tree': 0,
+          'page written requiring history store records': 0,
+          'pages read into cache': 216,
+          'pages read into cache after truncate': 0,
+          'pages read into cache after truncate in prepare state': 0,
+          'pages requested from the cache': 597343,
+          'pages seen by eviction walk': 1060,
+          'pages written from cache': 1029,
+          'pages written requiring in-memory restoration': 7,
+          'recent modification of a page blocked its eviction': 0,
+          'reverse splits performed': 0,
+          'reverse splits skipped because of VLCS namespace gap restrictions': 0,
+          'the number of times full update inserted to history store': 0,
+          'the number of times reverse modify inserted to history store': 0,
+          'tracked dirty bytes in the cache': 0,
+          'tracked dirty internal page bytes in the cache': 0,
+          'tracked dirty leaf page bytes in the cache': 0,
+          'uncommitted truncate blocked page eviction': 0,
+          'unmodified pages evicted': 8
+        },
+        cache_walk: {
+          'Average difference between current eviction generation when the page was last considered': 0,
+          'Average on-disk page image size seen': 0,
+          'Average time in cache for pages that have been visited by the eviction server': 0,
+          'Average time in cache for pages that have not been visited by the eviction server': 0,
+          'Clean pages currently in cache': 0,
+          'Current eviction generation': 0,
+          'Dirty pages currently in cache': 0,
+          'Entries in the root page': 0,
+          'Internal pages currently in cache': 0,
+          'Leaf pages currently in cache': 0,
+          'Maximum difference between current eviction generation when the page was last considered': 0,
+          'Maximum page size seen': 0,
+          'Minimum on-disk page image size seen': 0,
+          'Number of pages never visited by eviction server': 0,
+          'On-disk page image sizes smaller than a single allocation unit': 0,
+          'Pages created in memory and never written': 0,
+          'Pages currently queued for eviction': 0,
+          'Pages that could not be queued for eviction': 0,
+          'Refs skipped during cache traversal': 0,
+          'Size of the root page': 0,
+          'Total number of pages currently in cache': 0
+        },
+        'checkpoint-cleanup': {
+          'most recent duration on all eligible files (usecs)': 0,
+          'most recent handles processed': 0,
+          'pages added for eviction': 23,
+          'pages removed': 24,
+          'pages skipped during tree walk': 24,
+          'pages visited': 2192
+        },
+        compression: {
+          'compressed page maximum internal page size prior to compression': 4096,
+          'compressed page maximum leaf page size prior to compression ': 131072,
+          'compressed pages read': 216,
+          'compressed pages written': 980,
+          'number of blocks with compress ratio greater than 64': 0,
+          'number of blocks with compress ratio smaller than 16': 0,
+          'number of blocks with compress ratio smaller than 2': 0,
+          'number of blocks with compress ratio smaller than 32': 0,
+          'number of blocks with compress ratio smaller than 4': 191,
+          'number of blocks with compress ratio smaller than 64': 0,
+          'number of blocks with compress ratio smaller than 8': 25,
+          'page written failed to compress': 0,
+          'page written was too small to compress': 49
+        },
+        cursor: {
+          'Total number of deleted pages skipped during tree walk': 368,
+          'Total number of entries skipped by cursor next calls': 610989,
+          'Total number of entries skipped by cursor prev calls': 0,
+          'Total number of entries skipped to position the history store cursor': 0,
+          'Total number of in-memory deleted pages skipped during tree walk': 515,
+          'Total number of on-disk deleted pages skipped during tree walk': 0,
+          'Total number of times a search near has exited due to prefix config': 0,
+          'Total number of times cursor fails to temporarily release pinned page to encourage eviction of hot or large page': 0,
+          'Total number of times cursor temporarily releases pinned page to encourage eviction of hot or large page': 0,
+          'bulk loaded cursor insert calls': 0,
+          'cache cursors reuse count': 275688,
+          'close calls that result in cache': 275694,
+          'create calls': 44,
+          'cursor bound calls that return an error': 0,
+          'cursor bounds cleared from reset': 0,
+          'cursor bounds comparisons performed': 0,
+          'cursor bounds next called on an unpositioned cursor': 0,
+          'cursor bounds next early exit': 0,
+          'cursor bounds prev called on an unpositioned cursor': 0,
+          'cursor bounds prev early exit': 0,
+          'cursor bounds search early exit': 0,
+          'cursor bounds search near call repositioned cursor': 0,
+          'cursor cache calls that return an error': 0,
+          'cursor close calls that return an error': 0,
+          'cursor compare calls that return an error': 0,
+          'cursor equals calls that return an error': 0,
+          'cursor get key calls that return an error': 0,
+          'cursor get value calls that return an error': 0,
+          'cursor insert calls that return an error': 0,
+          'cursor insert check calls that return an error': 0,
+          'cursor largest key calls that return an error': 0,
+          'cursor modify calls that return an error': 0,
+          'cursor next calls that return an error': 0,
+          'cursor next calls that skip due to a globally visible history store tombstone': 0,
+          'cursor next calls that skip greater than 1 and fewer than 100 entries': 0,
+          'cursor next calls that skip greater than or equal to 100 entries': 144,
+          'cursor next random calls that return an error': 0,
+          'cursor prev calls that return an error': 0,
+          'cursor prev calls that skip due to a globally visible history store tombstone': 0,
+          'cursor prev calls that skip greater than or equal to 100 entries': 0,
+          'cursor prev calls that skip less than 100 entries': 0,
+          'cursor reconfigure calls that return an error': 0,
+          'cursor remove calls that return an error': 0,
+          'cursor reopen calls that return an error': 0,
+          'cursor reserve calls that return an error': 0,
+          'cursor reset calls that return an error': 0,
+          'cursor search calls that return an error': 0,
+          'cursor search near calls that return an error': 0,
+          'cursor update calls that return an error': 0,
+          'insert calls': 534576,
+          'insert key and value bytes': 51514297,
+          modify: 0,
+          'modify key and value bytes affected': 0,
+          'modify value bytes modified': 0,
+          'next calls': 7545667,
+          'open cursor count': 0,
+          'operation restarted': 182,
+          'prev calls': 1,
+          'remove calls': 34629,
+          'remove key bytes removed': 95313,
+          'reserve calls': 0,
+          'reset calls': 615141,
+          'search calls': 71854,
+          'search history store calls': 0,
+          'search near calls': 9975,
+          'truncate calls': 0,
+          'update calls': 0,
+          'update key and value bytes': 0,
+          'update value size change': 0
+        },
+        reconciliation: {
+          'VLCS pages explicitly reconciled as empty': 0,
+          'approximate byte size of timestamps in pages written': 16254864,
+          'approximate byte size of transaction IDs in pages written': 8127432,
+          'cursor next/prev calls during HS wrapup search_near': 0,
+          'dictionary matches': 0,
+          'fast-path pages deleted': 0,
+          'internal page key bytes discarded using suffix compression': 1903,
+          'internal page multi-block writes': 9,
+          'leaf page key bytes discarded using prefix compression': 0,
+          'leaf page multi-block writes': 39,
+          'leaf-page overflow keys': 0,
+          'maximum blocks required for a page': 1,
+          'overflow values written': 0,
+          'page reconciliation calls': 72,
+          'page reconciliation calls for eviction': 7,
+          'pages deleted': 0,
+          'pages written including an aggregated newest start durable timestamp ': 41,
+          'pages written including an aggregated newest stop durable timestamp ': 27,
+          'pages written including an aggregated newest stop timestamp ': 16,
+          'pages written including an aggregated newest stop transaction ID': 16,
+          'pages written including an aggregated newest transaction ID ': 41,
+          'pages written including an aggregated oldest start timestamp ': 41,
+          'pages written including an aggregated prepare': 0,
+          'pages written including at least one prepare': 0,
+          'pages written including at least one start durable timestamp': 935,
+          'pages written including at least one start timestamp': 935,
+          'pages written including at least one start transaction ID': 935,
+          'pages written including at least one stop durable timestamp': 69,
+          'pages written including at least one stop timestamp': 69,
+          'pages written including at least one stop transaction ID': 69,
+          'records written including a prepare': 0,
+          'records written including a start durable timestamp': 954610,
+          'records written including a start timestamp': 954610,
+          'records written including a start transaction ID': 954610,
+          'records written including a stop durable timestamp': 61319,
+          'records written including a stop timestamp': 61319,
+          'records written including a stop transaction ID': 61319
+        },
+        session: { 'object compaction': 0 },
+        transaction: {
+          'a reader raced with a prepared transaction commit and skipped an update or updates': 0,
+          'checkpoint has acquired a snapshot for its transaction': 0,
+          'number of times overflow removed value is read': 0,
+          'race to read prepared update retry': 0,
+          'rollback to stable history store keys that would have been swept in non-dryrun mode': 0,
+          'rollback to stable history store records with stop timestamps older than newer records': 0,
+          'rollback to stable inconsistent checkpoint': 0,
+          'rollback to stable keys removed': 0,
+          'rollback to stable keys restored': 0,
+          'rollback to stable keys that would have been removed in non-dryrun mode': 0,
+          'rollback to stable keys that would have been restored in non-dryrun mode': 0,
+          'rollback to stable restored tombstones from history store': 0,
+          'rollback to stable restored updates from history store': 0,
+          'rollback to stable skipping delete rle': 0,
+          'rollback to stable skipping stable rle': 0,
+          'rollback to stable sweeping history store keys': 0,
+          'rollback to stable tombstones from history store that would have been restored in non-dryrun mode': 0,
+          'rollback to stable updates from history store that would have been restored in non-dryrun mode': 0,
+          'rollback to stable updates removed from history store': 0,
+          'rollback to stable updates that would have been removed from history store in non-dryrun mode': 0,
+          'transaction checkpoints due to obsolete pages': 0,
+          'update conflicts': 0
+        }
+      },
+      nindexes: 2,
+      indexBuilds: [],
+      totalIndexSize: 42815488,
+      indexSizes: { _id_: 14843904, email_hashed: 27971584 },
+      totalSize: 60010496,
+      scaleFactor: 1
+    },
+    shard1ReplSet: {
+      size: 46393759,
+      count: 500053,
+      avgObjSize: 92,
+      numOrphanDocs: 0,
+      storageSize: 16371712,
+      freeStorageSize: 548864,
+      capped: false,
+      wiredTiger: {
+        metadata: { formatVersion: 1 },
+        creationString: 'access_pattern_hint=none,allocation_size=4KB,app_metadata=(formatVersion=1),assert=(commit_timestamp=none,durable_timestamp=none,read_timestamp=none,write_timestamp=on),block_allocation=best,block_compressor=snappy,cache_resident=false,checksum=on,colgroups=,collator=,columns=,dictionary=0,encryption=(keyid=,name=),exclusive=false,extractor=,format=btree,huffman_key=,huffman_value=,ignore_in_memory_cache_size=false,immutable=false,import=(compare_timestamp=oldest_timestamp,enabled=false,file_metadata=,metadata_file=,repair=false),internal_item_max=0,internal_key_max=0,internal_key_truncate=true,internal_page_max=4KB,key_format=q,key_gap=10,leaf_item_max=0,leaf_key_max=0,leaf_page_max=32KB,leaf_value_max=64MB,log=(enabled=false),lsm=(auto_throttle=true,bloom=true,bloom_bit_count=16,bloom_config=,bloom_hash_count=8,bloom_oldest=false,chunk_count_limit=0,chunk_max=5GB,chunk_size=10MB,merge_custom=(prefix=,start_generation=0,suffix=),merge_max=15,merge_min=0),memory_page_image_max=0,memory_page_max=10m,os_cache_dirty_max=0,os_cache_max=0,prefix_compression=false,prefix_compression_min=4,source=,split_deepen_min_child=0,split_deepen_per_child=0,split_pct=90,tiered_storage=(auth_token=,bucket=,bucket_prefix=,cache_directory=,local_retention=300,name=,object_target_size=0),type=file,value_format=u,verbose=[write_timestamp],write_timestamp_usage=none',
+        type: 'file',
+        uri: 'statistics:table:collection-52--679482285338238438',
+        LSM: {
+          'bloom filter false positives': 0,
+          'bloom filter hits': 0,
+          'bloom filter misses': 0,
+          'bloom filter pages evicted from cache': 0,
+          'bloom filter pages read into cache': 0,
+          'bloom filters in the LSM tree': 0,
+          'chunks in the LSM tree': 0,
+          'highest merge generation in the LSM tree': 0,
+          'queries that could have benefited from a Bloom filter that did not exist': 0,
+          'sleep for LSM checkpoint throttle': 0,
+          'sleep for LSM merge throttle': 0,
+          'total size of bloom filters': 0
+        },
+        autocommit: {
+          'retries for readonly operations': 0,
+          'retries for update operations': 0
+        },
+        'block-manager': {
+          'allocations requiring file extension': 538,
+          'blocks allocated': 923,
+          'blocks freed': 366,
+          'checkpoint size': 15806464,
+          'file allocation unit size': 4096,
+          'file bytes available for reuse': 548864,
+          'file magic number': 120897,
+          'file major version number': 1,
+          'file size in bytes': 16371712,
+          'minor version number': 0
+        },
+        btree: {
+          'btree checkpoint generation': 124,
+          'btree clean tree checkpoint expiration time': Long('9223372036854775807'),
+          'btree compact pages reviewed': 0,
+          'btree compact pages rewritten': 0,
+          'btree compact pages skipped': 0,
+          'btree number of pages reconciled during checkpoint': 59,
+          'btree skipped by compaction as process would not reduce size': 0,
+          'column-store fixed-size leaf pages': 0,
+          'column-store fixed-size time windows': 0,
+          'column-store internal pages': 0,
+          'column-store variable-size RLE encoded values': 0,
+          'column-store variable-size deleted values': 0,
+          'column-store variable-size leaf pages': 0,
+          'fixed-record size': 0,
+          'maximum internal page size': 4096,
+          'maximum leaf page key size': 2867,
+          'maximum leaf page size': 32768,
+          'maximum leaf page value size': 67108864,
+          'maximum tree depth': 3,
+          'number of key/value pairs': 0,
+          'overflow pages': 0,
+          'row-store empty values': 0,
+          'row-store internal pages': 0,
+          'row-store leaf pages': 0
+        },
+        cache: {
+          'bytes currently in the cache': 80798565,
+          'bytes dirty in the cache cumulative': 16013203,
+          'bytes read into cache': 20419284,
+          'bytes written from cache': 94800804,
+          'checkpoint blocked page eviction': 0,
+          'checkpoint of history store file blocked non-history store page eviction': 0,
+          'data source pages selected for eviction unable to be evicted': 0,
+          'eviction gave up due to detecting a disk value without a timestamp behind the last update on the chain': 0,
+          'eviction gave up due to detecting a tombstone without a timestamp ahead of the selected on disk update': 0,
+          'eviction gave up due to detecting a tombstone without a timestamp ahead of the selected on disk update after validating the update chain': 0,
+          'eviction gave up due to detecting update chain entries without timestamps after the selected on disk update': 0,
+          'eviction gave up due to needing to remove a record from the history store but checkpoint is running': 0,
+          'eviction gave up due to no progress being made': 0,
+          'eviction walk pages queued that had updates': 0,
+          'eviction walk pages queued that were clean': 0,
+          'eviction walk pages queued that were dirty': 0,
+          'eviction walk pages seen that had updates': 247,
+          'eviction walk pages seen that were clean': 1087,
+          'eviction walk pages seen that were dirty': 47,
+          'eviction walk passes of a file': 24,
+          'eviction walk target pages histogram - 0-9': 0,
+          'eviction walk target pages histogram - 10-31': 3,
+          'eviction walk target pages histogram - 128 and higher': 0,
+          'eviction walk target pages histogram - 32-63': 21,
+          'eviction walk target pages histogram - 64-128': 0,
+          'eviction walk target pages reduced due to history store cache pressure': 0,
+          'eviction walks abandoned': 0,
+          'eviction walks gave up because they restarted their walk twice': 24,
+          'eviction walks gave up because they saw too many pages and found no candidates': 0,
+          'eviction walks gave up because they saw too many pages and found too few candidates': 0,
+          'eviction walks random search fails to locate a page, results in a null position': 0,
+          'eviction walks reached end of tree': 48,
+          'eviction walks restarted': 0,
+          'eviction walks started from root of tree': 24,
+          'eviction walks started from saved location in tree': 0,
+          'hazard pointer blocked page eviction': 0,
+          'history store table insert calls': 0,
+          'history store table insert calls that returned restart': 0,
+          'history store table reads': 0,
+          'history store table reads missed': 0,
+          'history store table reads requiring squashed modifies': 0,
+          'history store table resolved updates without timestamps that lose their durable timestamp': 0,
+          'history store table truncation by rollback to stable to remove an unstable update': 0,
+          'history store table truncation by rollback to stable to remove an update': 0,
+          'history store table truncation to remove all the keys of a btree': 0,
+          'history store table truncation to remove an update': 0,
+          'history store table truncation to remove range of updates due to an update without a timestamp on data page': 0,
+          'history store table truncation to remove range of updates due to key being removed from the data page during reconciliation': 0,
+          'history store table truncations that would have happened in non-dryrun mode': 0,
+          'history store table truncations to remove an unstable update that would have happened in non-dryrun mode': 0,
+          'history store table truncations to remove an update that would have happened in non-dryrun mode': 0,
+          'history store table updates without timestamps fixed up by reinserting with the fixed timestamp': 0,
+          'history store table writes requiring squashed modifies': 0,
+          'in-memory page passed criteria to be split': 33,
+          'in-memory page splits': 11,
+          'internal page split blocked its eviction': 0,
+          'internal pages evicted': 0,
+          'internal pages split during eviction': 0,
+          'leaf pages split during eviction': 16,
+          'locate a random in-mem ref by examining all entries on the root page': 0,
+          'modified pages evicted': 31,
+          'multi-block reconciliation blocked whilst checkpoint is running': 0,
+          'obsolete updates removed': 0,
+          'overflow keys on a multiblock row-store page blocked its eviction': 0,
+          'overflow pages read into cache': 0,
+          'page split during eviction deepened the tree': 0,
+          'page written requiring history store records': 0,
+          'pages read into cache': 172,
+          'pages read into cache after truncate': 0,
+          'pages read into cache after truncate in prepare state': 0,
+          'pages requested from the cache': 598911,
+          'pages seen by eviction walk': 1417,
+          'pages written from cache': 881,
+          'pages written requiring in-memory restoration': 6,
+          'recent modification of a page blocked its eviction': 0,
+          'reverse splits performed': 0,
+          'reverse splits skipped because of VLCS namespace gap restrictions': 0,
+          'the number of times full update inserted to history store': 0,
+          'the number of times reverse modify inserted to history store': 0,
+          'tracked dirty bytes in the cache': 0,
+          'tracked dirty internal page bytes in the cache': 0,
+          'tracked dirty leaf page bytes in the cache': 0,
+          'uncommitted truncate blocked page eviction': 0,
+          'unmodified pages evicted': 8
+        },
+        cache_walk: {
+          'Average difference between current eviction generation when the page was last considered': 0,
+          'Average on-disk page image size seen': 0,
+          'Average time in cache for pages that have been visited by the eviction server': 0,
+          'Average time in cache for pages that have not been visited by the eviction server': 0,
+          'Clean pages currently in cache': 0,
+          'Current eviction generation': 0,
+          'Dirty pages currently in cache': 0,
+          'Entries in the root page': 0,
+          'Internal pages currently in cache': 0,
+          'Leaf pages currently in cache': 0,
+          'Maximum difference between current eviction generation when the page was last considered': 0,
+          'Maximum page size seen': 0,
+          'Minimum on-disk page image size seen': 0,
+          'Number of pages never visited by eviction server': 0,
+          'On-disk page image sizes smaller than a single allocation unit': 0,
+          'Pages created in memory and never written': 0,
+          'Pages currently queued for eviction': 0,
+          'Pages that could not be queued for eviction': 0,
+          'Refs skipped during cache traversal': 0,
+          'Size of the root page': 0,
+          'Total number of pages currently in cache': 0
+        },
+        'checkpoint-cleanup': {
+          'most recent duration on all eligible files (usecs)': 0,
+          'most recent handles processed': 0,
+          'pages added for eviction': 23,
+          'pages removed': 24,
+          'pages skipped during tree walk': 67,
+          'pages visited': 2373
+        },
+        compression: {
+          'compressed page maximum internal page size prior to compression': 4096,
+          'compressed page maximum leaf page size prior to compression ': 131072,
+          'compressed pages read': 172,
+          'compressed pages written': 825,
+          'number of blocks with compress ratio greater than 64': 0,
+          'number of blocks with compress ratio smaller than 16': 0,
+          'number of blocks with compress ratio smaller than 2': 0,
+          'number of blocks with compress ratio smaller than 32': 0,
+          'number of blocks with compress ratio smaller than 4': 154,
+          'number of blocks with compress ratio smaller than 64': 0,
+          'number of blocks with compress ratio smaller than 8': 18,
+          'page written failed to compress': 0,
+          'page written was too small to compress': 56
+        },
+        cursor: {
+          'Total number of deleted pages skipped during tree walk': 368,
+          'Total number of entries skipped by cursor next calls': 637002,
+          'Total number of entries skipped by cursor prev calls': 0,
+          'Total number of entries skipped to position the history store cursor': 0,
+          'Total number of in-memory deleted pages skipped during tree walk': 515,
+          'Total number of on-disk deleted pages skipped during tree walk': 0,
+          'Total number of times a search near has exited due to prefix config': 0,
+          'Total number of times cursor fails to temporarily release pinned page to encourage eviction of hot or large page': 0,
+          'Total number of times cursor temporarily releases pinned page to encourage eviction of hot or large page': 0,
+          'bulk loaded cursor insert calls': 0,
+          'cache cursors reuse count': 275811,
+          'close calls that result in cache': 275816,
+          'create calls': 42,
+          'cursor bound calls that return an error': 0,
+          'cursor bounds cleared from reset': 0,
+          'cursor bounds comparisons performed': 0,
+          'cursor bounds next called on an unpositioned cursor': 0,
+          'cursor bounds next early exit': 0,
+          'cursor bounds prev called on an unpositioned cursor': 0,
+          'cursor bounds prev early exit': 0,
+          'cursor bounds search early exit': 0,
+          'cursor bounds search near call repositioned cursor': 0,
+          'cursor cache calls that return an error': 0,
+          'cursor close calls that return an error': 0,
+          'cursor compare calls that return an error': 0,
+          'cursor equals calls that return an error': 0,
+          'cursor get key calls that return an error': 0,
+          'cursor get value calls that return an error': 0,
+          'cursor insert calls that return an error': 0,
+          'cursor insert check calls that return an error': 0,
+          'cursor largest key calls that return an error': 0,
+          'cursor modify calls that return an error': 0,
+          'cursor next calls that return an error': 0,
+          'cursor next calls that skip due to a globally visible history store tombstone': 0,
+          'cursor next calls that skip greater than 1 and fewer than 100 entries': 0,
+          'cursor next calls that skip greater than or equal to 100 entries': 144,
+          'cursor next random calls that return an error': 0,
+          'cursor prev calls that return an error': 0,
+          'cursor prev calls that skip due to a globally visible history store tombstone': 0,
+          'cursor prev calls that skip greater than or equal to 100 entries': 0,
+          'cursor prev calls that skip less than 100 entries': 0,
+          'cursor reconfigure calls that return an error': 0,
+          'cursor remove calls that return an error': 0,
+          'cursor reopen calls that return an error': 0,
+          'cursor reserve calls that return an error': 0,
+          'cursor reset calls that return an error': 0,
+          'cursor search calls that return an error': 0,
+          'cursor search near calls that return an error': 0,
+          'cursor update calls that return an error': 0,
+          'insert calls': 535424,
+          'insert key and value bytes': 51593213,
+          modify: 0,
+          'modify key and value bytes affected': 0,
+          'modify value bytes modified': 0,
+          'next calls': 7554938,
+          'open cursor count': 0,
+          'operation restarted': 212,
+          'prev calls': 1,
+          'remove calls': 35371,
+          'remove key bytes removed': 97539,
+          'reserve calls': 0,
+          'reset calls': 616879,
+          'search calls': 73310,
+          'search history store calls': 0,
+          'search near calls': 10068,
+          'truncate calls': 0,
+          'update calls': 0,
+          'update key and value bytes': 0,
+          'update value size change': 0
+        },
+        reconciliation: {
+          'VLCS pages explicitly reconciled as empty': 0,
+          'approximate byte size of timestamps in pages written': 13808352,
+          'approximate byte size of transaction IDs in pages written': 6904176,
+          'cursor next/prev calls during HS wrapup search_near': 0,
+          'dictionary matches': 0,
+          'fast-path pages deleted': 0,
+          'internal page key bytes discarded using suffix compression': 1598,
+          'internal page multi-block writes': 10,
+          'leaf page key bytes discarded using prefix compression': 0,
+          'leaf page multi-block writes': 39,
+          'leaf-page overflow keys': 0,
+          'maximum blocks required for a page': 1,
+          'overflow values written': 0,
+          'page reconciliation calls': 75,
+          'page reconciliation calls for eviction': 6,
+          'pages deleted': 0,
+          'pages written including an aggregated newest start durable timestamp ': 46,
+          'pages written including an aggregated newest stop durable timestamp ': 29,
+          'pages written including an aggregated newest stop timestamp ': 16,
+          'pages written including an aggregated newest stop transaction ID': 16,
+          'pages written including an aggregated newest transaction ID ': 46,
+          'pages written including an aggregated oldest start timestamp ': 46,
+          'pages written including an aggregated prepare': 0,
+          'pages written including at least one prepare': 0,
+          'pages written including at least one start durable timestamp': 781,
+          'pages written including at least one start timestamp': 781,
+          'pages written including at least one start transaction ID': 781,
+          'pages written including at least one stop durable timestamp': 72,
+          'pages written including at least one stop timestamp': 72,
+          'pages written including at least one stop transaction ID': 72,
+          'records written including a prepare': 0,
+          'records written including a start durable timestamp': 800116,
+          'records written including a start timestamp': 800116,
+          'records written including a start transaction ID': 800116,
+          'records written including a stop durable timestamp': 62906,
+          'records written including a stop timestamp': 62906,
+          'records written including a stop transaction ID': 62906
+        },
+        session: { 'object compaction': 0 },
+        transaction: {
+          'a reader raced with a prepared transaction commit and skipped an update or updates': 0,
+          'checkpoint has acquired a snapshot for its transaction': 0,
+          'number of times overflow removed value is read': 0,
+          'race to read prepared update retry': 0,
+          'rollback to stable history store keys that would have been swept in non-dryrun mode': 0,
+          'rollback to stable history store records with stop timestamps older than newer records': 0,
+          'rollback to stable inconsistent checkpoint': 0,
+          'rollback to stable keys removed': 0,
+          'rollback to stable keys restored': 0,
+          'rollback to stable keys that would have been removed in non-dryrun mode': 0,
+          'rollback to stable keys that would have been restored in non-dryrun mode': 0,
+          'rollback to stable restored tombstones from history store': 0,
+          'rollback to stable restored updates from history store': 0,
+          'rollback to stable skipping delete rle': 0,
+          'rollback to stable skipping stable rle': 0,
+          'rollback to stable sweeping history store keys': 0,
+          'rollback to stable tombstones from history store that would have been restored in non-dryrun mode': 0,
+          'rollback to stable updates from history store that would have been restored in non-dryrun mode': 0,
+          'rollback to stable updates removed from history store': 0,
+          'rollback to stable updates that would have been removed from history store in non-dryrun mode': 0,
+          'transaction checkpoints due to obsolete pages': 0,
+          'update conflicts': 0
+        }
+      },
+      nindexes: 2,
+      indexBuilds: [],
+      totalIndexSize: 43573248,
+      indexSizes: { _id_: 15339520, email_hashed: 28233728 },
+      totalSize: 59944960,
+      scaleFactor: 1
+    }
+  },
+  sharded: true,
+  size: 92777780,
+  count: 1000000,
+  numOrphanDocs: 0,
+  storageSize: 33566720,
+  totalIndexSize: 86388736,
+  totalSize: 119955456,
+  indexSizes: { _id_: 30183424, email_hashed: 56205312 },
+  avgObjSize: 92,
+  ns: 'indexpoc.users',
+  nindexes: 2,
+  scaleFactor: 1
+}
+[direct: mongos] indexpoc> db.users.countDocuments()
+1000000
+[direct: mongos] indexpoc> 
+
+#### Key Stats from Your Output:
+Metric	                  Value
+Total Docs	            1,000,000
+Shard                   1	500,053 (50.0%)
+Shard                   2	499,947 (49.99%)
+Chunks	                2 (1 per shard)
+Avg Doc Size	          92 bytes
+Total Size	            ~120 MB
+Index: _id	            ~30 MB
+Index: email_hashed	    ~56 MB
+
+##### One-Liner for Interview:
+"1 million documents sharded by hashed email. 500K on each shard. Equality finds any email in 0ms scanning 1 document. Range query scans all 1M documents because hash destroys alphabetical order."
+
+*One-Liner ----> Hashed index converts email to a random 64-bit number. You can find exact matches instantly, but you lose all ordering — so range queries and sorting require full collection scans. It's a tradeoff: fast point lookups, zero range support.*
+
+###### Cleanup:
+docker-compose down -v
+
