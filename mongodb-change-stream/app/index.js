@@ -79,3 +79,39 @@ async function start() {
 }
 
 start();
+
+// Flow of Change Streams:-
+// -----------------------
+// Application
+//       │
+//       │ insert/update/delete
+//       ▼
+// MongoDB Collection
+//       │
+//       │ Change occurs
+//       ▼
+// MongoDB writes the operation to the Oplog
+//       │
+//       ▼
+// Change Stream watches the Oplog
+//       │
+//       ▼
+// collection.watch() receives the change event
+//       │
+//       ▼
+// Your Node.js application gets the event
+//       │
+//       ▼
+// You can log it, send a WebSocket event, send an email, etc.
+
+// Suppose someone runs:
+// db.users.insertOne({
+//     name: "John"
+// });
+
+// MongoDB internally:
+// ✅ Inserts the document.
+// ✅ Records the operation in the Oplog.
+// ✅ The Change Stream reads the Oplog entry.
+// ✅ collection.watch() emits a "change" event.
+// ✅ Your application receives the change object.
