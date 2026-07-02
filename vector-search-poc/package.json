@@ -4,15 +4,26 @@
   "description": "MongoDB Vector Search POC with Node.js",
   "main": "src/search.js",
   "scripts": {
+    "create-images": "node src/create-dummy-images.js",
     "seed": "node src/seed-data.js",
     "search": "node src/search.js",
-    "generate-embeddings": "node src/generate-embeddings.js"
+    "generate-embeddings": "node src/generate-embeddings.js",
+    "generate-image-embeddings": "node src/generate-image-embeddings.js",
+    "seed-images": "node src/seed-image-data.js",
+    "seed-all": "npm run seed && npm run seed-images",
+    "search-combined": "node src/search-combined.js",
+    "search-images": "node src/search-combined.js --images"
   },
   "dependencies": {
+    "@tensorflow-models/mobilenet": "^2.1.1",
+    "@tensorflow/tfjs-node": "^4.22.0",
+    "canvas": "^3.2.3",
     "dotenv": "^16.6.1",
-    "mongodb": "^6.21.0"
+    "mongodb": "^6.21.0",
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
-    "@types/node": "^20.10.0"
+    "@types/node": "^20.10.0",
+    "typescript": "5.9"
   }
 }

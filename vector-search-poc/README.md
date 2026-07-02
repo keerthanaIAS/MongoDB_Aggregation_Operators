@@ -579,3 +579,210 @@ Managing embedding persistence
 │  3. "SQL vs NoSQL" (score: 0.65)                             │
 │  ✅ Semantic search working!                                  │
 └─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        VECTOR SEARCH POC                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────┐      ┌─────────────────────────────┐     │
+│  │  generate-embeddings.js     │      │     seed-data.js            │     │
+│  │                             │      │                             │     │
+│  │  📝 Creates sample data     │      │  📥 Inserts data into DB    │     │
+│  │  🔢 Generates embeddings    │      │  🗂️ Creates indexes         │     │
+│  │  💾 Saves to JSON file      │      │  ⚡ Creates vector index    │     │
+│  └────────────┬────────────────┘      └────────────┬────────────────┘     │
+│               │                                    │                       │
+│               ▼                                    ▼                       │
+│  ┌─────────────────────────────┐      ┌─────────────────────────────┐     │
+│  │  sample-data.json           │──────▶│  MongoDB Collection         │     │
+│  │  (File on disk)             │      │  (Database)                 │     │
+│  └─────────────────────────────┘      └─────────────────────────────┘     │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐  │
+│  │  search.js                                                         │  │
+│  │  🔍 Queries the collection using $vectorSearch                     │  │
+│  └─────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+#  *oh u r saying what are all in the filter field value that only create index and use vector search?*                       -->*important question*
+const indexDefinition = {
+  name: 'vector_index',
+  type: 'vectorSearch',
+  definition: {
+    fields: [
+      {
+        type: 'vector',
+        path: 'embedding',
+        numDimensions: 128,
+        similarity: 'cosine'
+      }
+    ],
+    filter: {
+      category: { $in: ["database", "ai"] }  // 👈 THIS!
+    }
+  }
+};
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    VECTOR INDEX WITH FILTER                            │
+│                                                                        │
+│  🔍 MongoDB: "Only create vector index for documents WHERE"            │
+│              category is "database" OR "ai"                            │
+│                                                                        │
+│  ┌────────────────────────────────────────────────────────────────┐    │
+│  │  ✅ Documents with category "database" → INDEXED               │     │
+│  │  ✅ Documents with category "ai"       → INDEXED               │     │
+│  │  ❌ Documents with category "search"   → NOT INDEXED           │     │
+│  └────────────────────────────────────────────────────────────────┘    │
+│                                                                        │
+│  🔍 Only these indexed documents can be used in $vectorSearch           │
+└─────────────────────────────────────────────────────────────────────────┘
+
+## vector search with filter Terminal log
+keerthana@Keerthanas-MacBook-Air vector-search-poc % npm run generate-embeddings
+
+> vector-search-poc@1.0.0 generate-embeddings
+> node src/generate-embeddings.js
+
+✅ Generated 10 documents with embeddings
+📁 Saved to: /Users/keerthana/Desktop/MongoDB_Aggregation_Operators/vector-search-poc/data/sample-data.json
+📊 Embedding dimension: 128
+keerthana@Keerthanas-MacBook-Air vector-search-poc % npm run seed               
+
+> vector-search-poc@1.0.0 seed
+> node src/seed-data.js
+
+✅ Connected to MongoDB
+🧹 Cleared existing documents
+📥 Inserted 10 documents
+⚡ Creating vector index...
+✅ Vector index created successfully
+🎉 Database seeded successfully!
+keerthana@Keerthanas-MacBook-Air vector-search-poc % npm run search             
+
+> vector-search-poc@1.0.0 search
+> node src/search.js
+
+🚀 Starting Vector Search Tests
+
+============================================================
+✅ Connected to MongoDB
+
+🔍 Query: "mongodb database tutorial"
+📊 Embedding dimension: 128
+
+============================================================
+📝 Found 3 results:
+
+1. SQL vs NoSQL Databases
+   Category: database
+   Tags: sql, nosql, comparison
+   Content: Compare relational databases with NoSQL databases for modern application development....
+   Score: 0.8348
+----------------------------------------
+2. Introduction to MongoDB
+   Category: database
+   Tags: mongodb, nosql, database
+   Content: MongoDB is a NoSQL document database that stores data in flexible JSON-like documents....
+   Score: 0.8296
+----------------------------------------
+3. MongoDB Aggregation Framework
+   Category: database
+   Tags: mongodb, aggregation, pipeline
+   Content: Powerful aggregation pipeline for transforming and analyzing data in MongoDB....
+   Score: 0.8284
+----------------------------------------
+
+============================================================
+
+✅ Connected to MongoDB
+
+🔍 Query: "ai and machine learning"
+📊 Embedding dimension: 128
+
+============================================================
+📝 Found 3 results:
+
+1. SQL vs NoSQL Databases
+   Category: database
+   Tags: sql, nosql, comparison
+   Content: Compare relational databases with NoSQL databases for modern application development....
+   Score: 0.8359
+----------------------------------------
+2. MongoDB Aggregation Framework
+   Category: database
+   Tags: mongodb, aggregation, pipeline
+   Content: Powerful aggregation pipeline for transforming and analyzing data in MongoDB....
+   Score: 0.8352
+----------------------------------------
+3. Introduction to MongoDB
+   Category: database
+   Tags: mongodb, nosql, database
+   Content: MongoDB is a NoSQL document database that stores data in flexible JSON-like documents....
+   Score: 0.8322
+----------------------------------------
+
+============================================================
+
+✅ Connected to MongoDB
+
+🔍 Query: "search algorithms"
+📊 Embedding dimension: 128
+
+============================================================
+📝 Found 3 results:
+
+1. SQL vs NoSQL Databases
+   Category: database
+   Tags: sql, nosql, comparison
+   Content: Compare relational databases with NoSQL databases for modern application development....
+   Score: 0.8351
+----------------------------------------
+2. MongoDB Aggregation Framework
+   Category: database
+   Tags: mongodb, aggregation, pipeline
+   Content: Powerful aggregation pipeline for transforming and analyzing data in MongoDB....
+   Score: 0.8332
+----------------------------------------
+3. Introduction to MongoDB
+   Category: database
+   Tags: mongodb, nosql, database
+   Content: MongoDB is a NoSQL document database that stores data in flexible JSON-like documents....
+   Score: 0.8318
+----------------------------------------
+
+============================================================
+
+✅ Connected to MongoDB
+
+🔍 Query: "natural language processing"
+📊 Embedding dimension: 128
+
+============================================================
+📝 Found 3 results:
+
+1. MongoDB Aggregation Framework
+   Category: database
+   Tags: mongodb, aggregation, pipeline
+   Content: Powerful aggregation pipeline for transforming and analyzing data in MongoDB....
+   Score: 0.8368
+----------------------------------------
+2. SQL vs NoSQL Databases
+   Category: database
+   Tags: sql, nosql, comparison
+   Content: Compare relational databases with NoSQL databases for modern application development....
+   Score: 0.8363
+----------------------------------------
+3. Introduction to MongoDB
+   Category: database
+   Tags: mongodb, nosql, database
+   Content: MongoDB is a NoSQL document database that stores data in flexible JSON-like documents....
+   Score: 0.8329
+----------------------------------------
+
+============================================================
+
+# *without vector search $ operator if i jsut create in the altlas direclty using create index can i use vector search*?     --->*important question*
+No.
+
+Creating a Vector Search index in Atlas is not enough. The index only stores and organizes vectors. To actually search those vectors, you must use the $vectorSearch aggregation stage.
