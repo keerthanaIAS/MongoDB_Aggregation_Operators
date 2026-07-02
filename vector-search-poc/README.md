@@ -786,3 +786,106 @@ keerthana@Keerthanas-MacBook-Air vector-search-poc % npm run search
 No.
 
 Creating a Vector Search index in Atlas is not enough. The index only stores and organizes vectors. To actually search those vectors, you must use the $vectorSearch aggregation stage.
+
+
+# The important point is:                                                                                                  -->*important notes*
+**you cannot change this Vector Search index to "dynamic"** because **Vector Search does not support `dynamic: true` or `dynamic: false`.**
+
+code:
+
+```javascript
+const indexDefinition = {
+  name: "vector_index",
+  type: "vectorSearch",
+  definition: {
+    fields: [
+      {
+        type: "vector",
+        path: "embedding",
+        numDimensions: 128,
+        similarity: "cosine"
+      },
+      {
+        type: "filter",
+        path: "category"
+      }
+    ]
+  }
+};
+```
+
+is already the correct format for a Vector Search index.
+
+### If you want to add more filter fields
+
+You simply add them explicitly:
+
+```javascript
+fields: [
+  {
+    type: "vector",
+    path: "embedding",
+    numDimensions: 128,
+    similarity: "cosine"
+  },
+  {
+    type: "filter",
+    path: "category"
+  },
+  {
+    type: "filter",
+    path: "brand"
+  },
+  {
+    type: "filter",
+    path: "price"
+  },
+  {
+    type: "filter",
+    path: "rating"
+  }
+]
+```
+
+There is **no**:
+
+```javascript
+dynamic: true
+```
+
+for a `vectorSearch` index.
+
+---
+
+### If your goal is to learn "dynamic indexing"
+
+Then you need an **Atlas Search** index, not a **Vector Search** index.
+
+For an Atlas Search index, the definition looks like:
+
+```json
+{
+  "mappings": {
+    "dynamic": true
+  }
+}
+```
+
+or
+
+```json
+{
+  "mappings": {
+    "dynamic": false,
+    "fields": {
+      "title": {
+        "type": "string"
+      }
+    }
+  }
+}
+```
+
+These are used with the **`$search`** aggregation stage, **not** **`$vectorSearch`**.
+
+### So there is nothing you need to change in your current code to make it "dynamic"—that feature simply doesn't exist for `type: "vectorSearch"` indexes. If someone asked you to demonstrate dynamic indexing, they are referring to **Atlas Search**, not **Atlas Vector Search**.
